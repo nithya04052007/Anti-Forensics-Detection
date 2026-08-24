@@ -1,0 +1,52 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment Variables & Secrets
+.env
+.env.*
+*.env
+*.key
+*.pem
+secrets.*
+*secret*
+*password*
+
+# Forensic Evidence & Temporary Uploads (Do not upload actual evidence files)
+evidence_vault/
+uploads/
+*.tmp
+*.bak
+*.swp
+*.log
+*.db-journal
+
+# Ephemeral runtime reports (Keep directory structure, ignore generated PDFs)
+reports/report_*.pdf
+!reports/.gitkeep
+
+# System & IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+# Local databases and generated data
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+
+# Generated/local reports
+reports/*
+!reports/.gitkeep

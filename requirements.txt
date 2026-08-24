@@ -1,0 +1,22 @@
+# Automated Anti-Forensics Detection System — Dependencies (Phase 1 & Phase 2)
+# Core DFIR & Analysis Libraries
+yara-python>=4.3.1
+volatility3>=2.5.0
+pandas>=2.0.0
+scikit-learn>=1.2.0
+scipy>=1.8.0
+joblib>=1.2.0
+
+# Windows System / Event Log / Registry Inspection (Conditional for Windows)
+pywin32>=306; sys_platform == 'win32'
+python-evtx>=0.7.4
+
+# PDF Report Generation & Formatting
+reportlab>=3.6.0
+tabulate>=0.9.0
+colorama>=0.4.6
+
+# Web Application & Production WSGI Server
+flask>=2.3.0
+werkzeug>=2.3.0
+gunicorn>=21.2.0

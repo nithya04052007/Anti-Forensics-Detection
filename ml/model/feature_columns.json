@@ -1,0 +1,18 @@
+[
+  "file_size",
+  "is_hidden",
+  "is_in_hidden_folder",
+  "extension_match",
+  "has_double_extension",
+  "has_suspicious_extension",
+  "signature_type",
+  "metadata_anomaly",
+  "filename_anomaly",
+  "access_time_anomaly",
+  "modification_time_anomaly",
+  "creation_time_anomaly",
+  "has_ads_streams",
+  "subsecond_zeroed",
+  "causal_m_lt_c",
+  "future_timestamp"
+]

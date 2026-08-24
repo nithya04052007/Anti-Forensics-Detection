@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anti-Forensics Detection System — DFIR Investigation Suite</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="brand-icon">🛡️</div>
+                <div class="brand-text">
+                    <h2>AntiForensics</h2>
+                    <span>DFIR Defense Suite</span>
+                </div>
+            </div>
+
+            <nav class="nav-menu">
+                <button class="nav-item active" id="nav-dashboard" onclick="switchView('dashboard')">
+                    <span class="icon">🔍</span> Forensic Scanner
+                </button>
+                <button class="nav-item" id="nav-history" onclick="switchView('history')">
+                    <span class="icon">📜</span> Scan History
+                </button>
+                <button class="nav-item" id="nav-features" onclick="switchView('features')">
+                    <span class="icon">🧠</span> ML Feature Matrix
+                </button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="milestone-badge">
+                    <span class="dot"></span> Phase 2 Active
+                </div>
+                <small>Random Forest • ReportLab • SQLite</small>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Header Bar -->
+            <header class="top-header">
+                <div class="header-title">
+                    <h1 id="view-title">User-Driven Forensic Analysis</h1>
+                    <p id="view-subtitle">Select an evidence file from Windows File Explorer for strict read-only forensic inspection</p>
+                </div>
+                <div class="header-actions">
+                    <button class="btn btn-secondary" onclick="triggerBatchScan('demo')">
+                        ⚡ Run Demo Sandbox
+                    </button>
+                    <button class="btn btn-primary" id="btn-start-new-scan" onclick="openStartScanFlow()">
+                        + Start New Scan
+                    </button>
+                </div>
+            </header>
+
+            <!-- Metrics Overview Cards -->
+            <section class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-icon blue">📁</div>
+                    <div class="metric-data">
+                        <span class="metric-label">Total Evidence Scans</span>
+                        <h3 id="stat-total-scans">0</h3>
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-icon red">⚠️</div>
+                    <div class="metric-data">
+                        <span class="metric-label">Evasion Findings</span>
+                        <h3 id="stat-total-findings">0</h3>
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-icon purple">🔥</div>
+                    <div class="metric-data">
+                        <span class="metric-label">High / Critical Risk Files</span>
+                        <h3 id="stat-critical-findings">0</h3>
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-icon green">🎯</div>
+                    <div class="metric-data">
+                        <span class="metric-label">ML Model Accuracy</span>
+                        <h3 id="stat-ml-acc">96.7%</h3>
+                    </div>
+                </div>
+            </section>
+
+            <!-- VIEW 1: Main Scanner & Active Evidence Inspection -->
+            <section class="dashboard-body" id="view-scanner-body">
+                <!-- Left Column: Scan Sessions -->
+                <div class="panel scans-panel">
+                    <div class="panel-header">
+                        <h3>Recent Scans</h3>
+                        <button class="btn-sm" onclick="loadScans()">↻ Refresh</button>
+                    </div>
+                    <div class="scans-list" id="scans-container">
+                        <div class="loading-state">Loading scan records...</div>
+                    </div>
+                </div>
+
+                <!-- Right Column: Active Evidence Inspection Panel -->
+                <div class="panel details-panel">
+                    <div class="panel-header" id="details-header">
+                        <div>
+                            <h3 id="selected-scan-title">Evidence File Inspection</h3>
+                            <span class="scan-meta-tag" id="selected-scan-meta">Select a scan or click "Start New Scan" above</span>
+                        </div>
+                        <div class="panel-header-actions" id="details-actions" style="display: none;">
+                            <button class="btn-sm btn-primary" id="btn-download-report" onclick="downloadCurrentPDFReport()">
+                                📄 Generate Report (PDF)
+                            </button>
+                            <button class="btn-sm btn-outline" id="btn-export-csv" onclick="exportCurrentCSV()">
+                                📥 Export ML Vector (.CSV)
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="panel-content" id="details-content">
+                        <!-- Evidence File Selection Banner -->
+                        <div class="file-selection-banner" id="file-selection-banner">
+                            <!-- Hidden HTML File & Folder Inputs (Opens Windows File Explorer natively) -->
+                            <input type="file" id="evidence-file-input" style="display: none;" onchange="handleFileChosen(event)">
+                            <input type="file" id="evidence-folder-input" webkitdirectory directory multiple style="display: none;" onchange="handleFolderChosen(event)">
+
+                            <div class="banner-icon">📂</div>
+                            <div class="banner-info">
+                                <h4>Evidence File Ready for Scan</h4>
+                                <p id="banner-path-text">No evidence file selected yet. Click below to browse Windows File Explorer.</p>
+                            </div>
+                            <div class="banner-buttons">
+                                <button class="btn btn-secondary" onclick="openFilePicker()">
+                                    🔍 Select File
+                                </button>
+                                <button class="btn btn-outline" onclick="openFolderPicker()" style="font-size: 13px;">
+                                    📁 Select Folder
+                                </button>
+                                <button class="btn btn-primary" id="btn-run-scan" onclick="executeSelectedFileScan()" style="display: none;">
+                                    🚀 Scan Selected File
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Forensic Assessment & Risk Score Overview -->
+                        <div class="risk-overview-bar" id="risk-overview-bar" style="display: none;">
+                            <div class="risk-gauge">
+                                <span class="risk-title">Anti-Forensics Risk Index</span>
+                                <div class="risk-meter">
+                                    <div class="risk-fill" id="risk-meter-fill"></div>
+                                </div>
+                                <div class="risk-number" id="risk-meter-text">0.0 / 100</div>
+                            </div>
+                            <div class="risk-badge-box">
+                                <span class="risk-level-badge" id="risk-level-badge">LOW RISK</span>
+                            </div>
+                            <div class="risk-breakdown" id="risk-breakdown-tags"></div>
+                        </div>
+
+                        <!-- File Forensic Properties Card -->
+                        <div class="evidence-meta-card" id="evidence-meta-card" style="display: none;">
+                            <h4 class="card-section-title">Evidence Properties & Metadata (Strict Read-Only)</h4>
+                            <div class="meta-grid">
+                                <div class="meta-item">
+                                    <span class="label">File Name:</span>
+                                    <span class="val mono" id="meta-file-name">-</span>
+                                </div>
+                                <div class="meta-item">
+                                    <span class="label">File Size:</span>
+                                    <span class="val" id="meta-file-size">-</span>
+                                </div>
+                                <div class="meta-item">
+                                    <span class="label">Claimed Extension:</span>
+                                    <span class="val mono" id="meta-extension">-</span>
+                                </div>
+                                <div class="meta-item">
+                                    <span class="label">Actual Signature:</span>
+                                    <span class="val" id="meta-signature">-</span>
+                                </div>
+                                <div class="meta-item">
+                                    <span class="label">Signature Match:</span>
+                                    <span class="val" id="meta-sig-match">-</span>
+                                </div>
+                                <div class="meta-item">
+                                    <span class="label">Hidden Status:</span>
+                                    <span class="val" id="meta-hidden-status">-</span>
+                                </div>
+                                <div class="meta-item">
+                                    <span class="label">Created (UTC):</span>
+                                    <span class="val mono" id="meta-created-time">-</span>
+                                </div>
+                                <div class="meta-item">
+                                    <span class="label">Modified (UTC):</span>
+                                    <span class="val mono" id="meta-modified-time">-</span>
+                                </div>
+                                <div class="meta-item">
+                                    <span class="label">Accessed (UTC):</span>
+                                    <span class="val mono" id="meta-accessed-time">-</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- ML Risk Prediction Card -->
+                        <div class="ml-prediction-card" id="ml-prediction-card" style="display: none;">
+                            <h4 class="card-section-title">Machine Learning Classification (Random Forest Model)</h4>
+                            <div class="ml-grid">
+                                <div class="ml-item">
+                                    <span class="label">ML Risk Prediction:</span>
+                                    <span class="val" id="ml-pred-label">-</span>
+                                </div>
+                                <div class="ml-item">
+                                    <span class="label">Suspicious Probability:</span>
+                                    <span class="val mono" id="ml-prob-val">-</span>
+                                </div>
+                                <div class="ml-item">
+                                    <span class="label">Model Confidence:</span>
+                                    <span class="val mono" id="ml-conf-val">-</span>
+                                </div>
+                                <div class="ml-item">
+                                    <span class="label">Assessment Note:</span>
+                                    <span class="val" id="ml-note-val">Evaluated against 16 engineered forensic features</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Forensic Findings Table -->
+                        <div class="table-container" id="findings-table-wrap">
+                            <div class="empty-state">
+                                <div class="empty-icon">🛡️</div>
+                                <h4>No Scan Active</h4>
+                                <p>Click <b>Start New Scan</b> above to select a file from Windows File Explorer or choose a past scan from the list.</p>
+                            </div>
+                        </div>
+
+                        <!-- Features Matrix Table (ML View) -->
+                        <div class="features-view" id="features-table-wrap" style="display: none;">
+                            <table class="data-table" id="features-table">
+                                <thead>
+                                    <tr>
+                                        <th>Forensic Feature Name</th>
+                                        <th>Feature Type</th>
+                                        <th>Extracted Value</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="features-tbody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- VIEW 2: Complete Scan History View -->
+            <section class="dashboard-body" id="view-history-body" style="display: none; grid-template-columns: 1fr;">
+                <div class="panel">
+                    <div class="panel-header">
+                        <h3>Historical Evidence Scans (Persistent SQLite Storage)</h3>
+                        <button class="btn-sm" onclick="loadScans()">↻ Refresh History</button>
+                    </div>
+                    <div class="panel-content">
+                        <div class="table-container">
+                            <table class="data-table" id="history-data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Scan ID</th>
+                                        <th>Date & Time (UTC)</th>
+                                        <th>Evidence Target</th>
+                                        <th>Risk Score</th>
+                                        <th>Risk Level</th>
+                                        <th>ML Prediction</th>
+                                        <th>Total Findings</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="history-tbody">
+                                    <tr><td colspan="8" class="loading-state">Loading history...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Start Scan Selection Modal -->
+    <div class="modal" id="scan-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Start New Forensic Scan</h3>
+                <button class="modal-close" onclick="closeScanModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 16px;">
+                    Select the forensic investigation mode. The target evidence file will be analyzed in <b>strict read-only mode</b> without altering file content or metadata.
+                </p>
+                <div class="scan-option-card" onclick="openFilePickerFromModal()">
+                    <div class="option-icon">📄</div>
+                    <div class="option-text">
+                        <h4>Select Evidence File (Windows Explorer)</h4>
+                        <p>Opens Windows File Explorer to choose an individual file for signature, timestomp, and ML risk evaluation.</p>
+                    </div>
+                </div>
+                <div class="scan-option-card" onclick="openFolderPickerFromModal()">
+                    <div class="option-icon">📁</div>
+                    <div class="option-text">
+                        <h4>Select Evidence Folder / Directory</h4>
+                        <p>Opens Windows Explorer to select an entire folder of evidence files for batch forensic scanning.</p>
+                    </div>
+                </div>
+                <div class="scan-option-card" onclick="triggerBatchScan('demo')">
+                    <div class="option-icon">⚡</div>
+                    <div class="option-text">
+                        <h4>Sandbox Simulation Demo</h4>
+                        <p>Automatically generates controlled test artifacts with timestomping, ADS, and wiped logs to demonstrate detections.</p>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeScanModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

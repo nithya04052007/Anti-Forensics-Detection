@@ -34,6 +34,19 @@
             </nav>
 
             <div class="sidebar-footer">
+                <div class="user-session-card">
+                    <div class="user-session-info">
+                        <div class="user-avatar">👤</div>
+                        <div class="user-details">
+                            <span class="user-name" title="{{ user.email if user and user.email else '' }}">{{ user.full_name if user and user.full_name else (user.username if user and user.username else 'Analyst') }}</span>
+                            <span class="user-role-badge">{{ user.role|upper if user and user.role else 'ANALYST' }}</span>
+                        </div>
+
+                    </div>
+                    <a href="/logout" class="btn-logout" title="Log out from session" id="sidebar-logout-btn">
+                        <span>🚪</span> Log out
+                    </a>
+                </div>
                 <div class="milestone-badge">
                     <span class="dot"></span> Phase 2 Active
                 </div>
@@ -56,8 +69,12 @@
                     <button class="btn btn-primary" id="btn-start-new-scan" onclick="openStartScanFlow()">
                         + Start New Scan
                     </button>
+                    <a href="/logout" class="btn btn-logout-header" title="Log out" id="header-logout-btn">
+                        🚪 Logout
+                    </a>
                 </div>
             </header>
+
 
             <!-- Metrics Overview Cards -->
             <section class="metrics-grid">

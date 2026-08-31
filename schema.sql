@@ -53,6 +53,22 @@ CREATE TABLE IF NOT EXISTS features (
 );
 
 -- ============================================================================
+-- Table: users
+-- Stores investigator & analyst authentication credentials and roles
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS users (
+    user_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    full_name       TEXT,
+    username        TEXT UNIQUE NOT NULL,
+    email           TEXT UNIQUE,
+    password_hash   TEXT NOT NULL,
+    role            TEXT NOT NULL DEFAULT 'analyst', -- 'admin', 'analyst', 'investigator'
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_login      TIMESTAMP
+);
+
+
+-- ============================================================================
 -- Indexes for fast querying & reporting
 -- ============================================================================
 CREATE INDEX IF NOT EXISTS idx_findings_scan_id ON findings(scan_id);
@@ -61,3 +77,6 @@ CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_features_scan_id ON features(scan_id);
 CREATE INDEX IF NOT EXISTS idx_features_name ON features(feature_name);
 CREATE INDEX IF NOT EXISTS idx_scans_start_time ON scans(start_time);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+

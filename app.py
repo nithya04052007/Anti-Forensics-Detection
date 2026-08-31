@@ -8,7 +8,8 @@ permanent SQLite storage, historical scan viewer, and PDF report generation.
 import os
 import sys
 import json
-from flask import Flask, render_template, jsonify, request, send_file
+from functools import wraps
+from flask import Flask, render_template, jsonify, request, send_file, session, redirect, url_for, flash
 
 from src.db.db_manager import DatabaseManager
 from src.analysis.file_scanner import run_single_file_scan, DEFAULT_DB_PATH, REPORTS_DIR
@@ -20,13 +21,181 @@ from src.utils.simulator import ForensicSandboxSimulator
 from src.utils.pdf_generator import generate_forensic_pdf_report
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY") or os.environ.get("FLASK_SECRET_KEY") or "anti-forensics-dfir-secure-key-2026"
+
 db = DatabaseManager(db_path=DEFAULT_DB_PATH)
 
 
+def login_required(f):
+    """
+    Decorator to protect routes from unauthenticated access.
+    Redirects browser requests to /login and returns 401 for API requests.
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "user_id" not in session:
+            if request.path.startswith("/api/") or request.is_json:
+                return jsonify({"status": "error", "message": "Authentication required. Please log in."}), 401
+            return redirect(url_for("login", next=request.path))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+# ============================================================================
+# ============================================================================
+# Authentication Routes (Register, Login, Logout)
+# ============================================================================
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    """Render sign up page and register new user account."""
+    if "user_id" in session:
+        return redirect(url_for("index"))
+
+    error = None
+    if request.method == "POST":
+        if request.is_json:
+            data = request.get_json() or {}
+            full_name = data.get("name", "").strip()
+            email = data.get("email", "").strip().lower()
+            password = data.get("password", "")
+            confirm_password = data.get("confirm_password", "")
+        else:
+            full_name = request.form.get("name", "").strip()
+            email = request.form.get("email", "").strip().lower()
+            password = request.form.get("password", "")
+            confirm_password = request.form.get("confirm_password", "")
+
+        # Input Validations
+        if not full_name:
+            error = "Please enter your full name."
+        elif not email or "@" not in email or "." not in email:
+            error = "Please enter a valid email address."
+        elif not password or len(password) < 6:
+            error = "Password must be at least 6 characters long."
+        elif password != confirm_password:
+            error = "Passwords do not match. Please verify and re-enter."
+        else:
+            # Check if email is already registered
+            existing_user = db.get_user_by_username_or_email(email)
+            if existing_user:
+                error = "An account with this email address already exists. Please log in."
+            else:
+                # Generate unique username from email
+                base_username = email.split("@")[0].replace(".", "_").replace("-", "_")
+                candidate_username = base_username
+                suffix = 1
+                while db.get_user_by_username_or_email(candidate_username):
+                    candidate_username = f"{base_username}_{suffix}"
+                    suffix += 1
+
+                user_id = db.create_user(
+                    username=candidate_username,
+                    password=password,
+                    email=email,
+                    full_name=full_name,
+                    role="analyst"
+                )
+
+                if user_id:
+                    # Auto-login newly registered user
+                    session.clear()
+                    session["user_id"] = user_id
+                    session["username"] = candidate_username
+                    session["full_name"] = full_name
+                    session["email"] = email
+                    session["role"] = "analyst"
+
+                    if request.is_json:
+                        return jsonify({
+                            "status": "success",
+                            "message": "Account created successfully.",
+                            "redirect": url_for("index")
+                        })
+                    return redirect(url_for("index"))
+                else:
+                    error = "Failed to create account. Please try again."
+
+        if request.is_json and error:
+            return jsonify({"status": "error", "message": error}), 400
+
+    return render_template("register.html", error=error)
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    """Render login page and authenticate users."""
+    if "user_id" in session:
+        return redirect(url_for("index"))
+
+    error = None
+    success = request.args.get("registered")
+
+    if request.method == "POST":
+        if request.is_json:
+            data = request.get_json() or {}
+            identifier = data.get("email") or data.get("username") or ""
+            password = data.get("password") or ""
+        else:
+            identifier = request.form.get("email") or request.form.get("username") or ""
+            password = request.form.get("password") or ""
+
+        if not identifier or not password:
+            error = "Please enter both email address and password."
+        else:
+            # Check user existence for specific feedback
+            existing = db.get_user_by_username_or_email(identifier)
+            if not existing:
+                error = "No account found with this email address. Please sign up."
+            else:
+                user = db.verify_user(identifier, password)
+                if user:
+                    session.clear()
+                    session["user_id"] = user["user_id"]
+                    session["username"] = user["username"]
+                    session["full_name"] = user.get("full_name") or user["username"]
+                    session["email"] = user.get("email")
+                    session["role"] = user.get("role", "analyst")
+
+                    next_page = request.args.get("next") or request.form.get("next")
+                    if not next_page or not next_page.startswith("/") or next_page.startswith("//"):
+                        next_page = url_for("index")
+
+                    if request.is_json:
+                        return jsonify({"status": "success", "redirect": next_page, "user": user})
+                    return redirect(next_page)
+                else:
+                    error = "Incorrect password. Please try again."
+
+        if request.is_json:
+            return jsonify({"status": "error", "message": error}), 401
+
+    return render_template("login.html", error=error, success=success)
+
+
+@app.route("/logout", methods=["GET", "POST"])
+def logout():
+    """Log out current user and clear session."""
+    session.clear()
+    if request.is_json:
+        return jsonify({"status": "success", "message": "Successfully logged out."})
+    return redirect(url_for("login"))
+
+
 @app.route("/")
+@login_required
 def index():
     """Render main DFIR dashboard view."""
-    return render_template("index.html")
+    current_user = {
+        "user_id": session.get("user_id"),
+        "username": session.get("username", "Analyst"),
+        "full_name": session.get("full_name") or session.get("username", "Analyst"),
+        "email": session.get("email", ""),
+        "role": session.get("role", "analyst")
+    }
+    return render_template("index.html", user=current_user)
+
+
 
 
 # ============================================================================
@@ -38,6 +207,7 @@ os.makedirs(EVIDENCE_VAULT, exist_ok=True)
 
 
 @app.route("/api/scan/upload", methods=["POST"])
+@login_required
 def upload_and_scan_evidence():
     """
     Handle secure file upload from the browser's native Windows File Explorer picker.
@@ -85,6 +255,7 @@ def upload_and_scan_evidence():
 
 
 @app.route("/api/scan/upload-folder", methods=["POST"])
+@login_required
 def upload_and_scan_folder():
     """
     Handle multi-file / folder evidence upload from browser folder selection.
@@ -140,6 +311,7 @@ def upload_and_scan_folder():
 
 
 @app.route("/api/scan/file", methods=["POST"])
+@login_required
 def scan_selected_file():
     """
     Scan a local evidence file path in strict READ-ONLY mode.
@@ -163,6 +335,7 @@ def scan_selected_file():
 # ============================================================================
 
 @app.route("/api/report/<scan_id>", methods=["GET"])
+@login_required
 def download_pdf_report(scan_id):
     """Generate or retrieve and download the forensic PDF report for a scan session."""
     pdf_filename = f"report_{scan_id}.pdf"
@@ -219,6 +392,7 @@ def download_pdf_report(scan_id):
 
 @app.route("/api/scans", methods=["GET"])
 @app.route("/api/history", methods=["GET"])
+@login_required
 def get_scans():
     """Retrieve list of historical scans from SQLite."""
     scans = db.list_scans(limit=100)
@@ -226,6 +400,7 @@ def get_scans():
 
 
 @app.route("/api/scan/<scan_id>", methods=["GET"])
+@login_required
 def get_scan_details(scan_id):
     """Retrieve full details, findings, and features for a specific scan."""
     scan = db.get_scan(scan_id)
@@ -244,6 +419,7 @@ def get_scan_details(scan_id):
 
 
 @app.route("/api/scan/trigger", methods=["POST"])
+@login_required
 def trigger_scan():
     """Trigger a batch scan (demo simulation, directory scan, or live system audit)."""
     data = request.get_json() or {}
@@ -307,6 +483,7 @@ def trigger_scan():
 
 
 @app.route("/api/features/export/<scan_id>", methods=["GET"])
+@login_required
 def export_features_csv(scan_id):
     """Export and download scan features as CSV."""
     df = db.get_features_dataframe(scan_id=scan_id)
@@ -316,6 +493,7 @@ def export_features_csv(scan_id):
     csv_path = f"export_{scan_id}.csv"
     df.to_csv(csv_path, index=False)
     return send_file(csv_path, as_attachment=True, download_name=f"features_{scan_id}.csv")
+
 
 
 if __name__ == "__main__":

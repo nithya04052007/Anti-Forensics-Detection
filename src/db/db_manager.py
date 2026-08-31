@@ -9,6 +9,7 @@ import os
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 import pandas as pd
+from werkzeug.security import generate_password_hash, check_password_hash
 
 from ..collection.models import Finding, ScanResult
 
@@ -19,6 +20,7 @@ class DatabaseManager:
         if os.path.dirname(self.db_path):
             os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         self._ensure_schema()
+        self.seed_default_admin()
 
     def get_connection(self) -> sqlite3.Connection:
         """Create and return a configured SQLite connection with foreign keys enabled."""
@@ -41,6 +43,16 @@ class DatabaseManager:
                 conn.executescript(schema_sql)
         else:
             self._create_inline_schema()
+
+        # Graceful migration: ensure full_name column exists
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.execute("PRAGMA table_info(users)")
+                columns = [row["name"] for row in cursor.fetchall()]
+                if columns and "full_name" not in columns:
+                    conn.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
+        except Exception:
+            pass
 
     def _create_inline_schema(self) -> None:
         """Inline schema fallback in case schema.sql is not found."""
@@ -83,7 +95,23 @@ class DatabaseManager:
                 FOREIGN KEY (scan_id) REFERENCES scans(scan_id) ON DELETE CASCADE,
                 UNIQUE(scan_id, feature_name)
             );
+
+            CREATE TABLE IF NOT EXISTS users (
+                user_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name       TEXT,
+                username        TEXT UNIQUE NOT NULL,
+                email           TEXT UNIQUE,
+                password_hash   TEXT NOT NULL,
+                role            TEXT NOT NULL DEFAULT 'analyst',
+                created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_login      TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+            CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
             """)
+
+
 
     # =========================================================================
     # Scan Management
@@ -327,3 +355,127 @@ class DatabaseManager:
 
         pivot_df.columns.name = None
         return pivot_df
+
+    # =========================================================================
+    # User Management & Authentication
+    # =========================================================================
+
+    def create_user(
+        self,
+        username: str,
+        password: str,
+        email: Optional[str] = None,
+        full_name: Optional[str] = None,
+        role: str = "analyst"
+    ) -> Optional[int]:
+        """
+        Create a new user with securely hashed password.
+        Returns user_id if successful, or None if username/email already exists.
+        """
+        password_hash = generate_password_hash(password, method="pbkdf2:sha256")
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO users (username, email, full_name, password_hash, role, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        username.strip().lower(),
+                        email.strip().lower() if email else None,
+                        full_name.strip() if full_name else None,
+                        password_hash,
+                        role,
+                        datetime.now(timezone.utc).isoformat()
+                    )
+                )
+                return cursor.lastrowid
+        except sqlite3.IntegrityError:
+            return None
+
+    def get_user_by_username_or_email(self, identifier: str) -> Optional[Dict[str, Any]]:
+        """Retrieve user record by username or email (case-insensitive)."""
+        clean_identifier = identifier.strip().lower()
+        with self.get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM users
+                WHERE LOWER(username) = ? OR LOWER(email) = ?
+                """,
+                (clean_identifier, clean_identifier)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        """Retrieve user record by email address (case-insensitive)."""
+        clean_email = email.strip().lower()
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE LOWER(email) = ?",
+                (clean_email,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Retrieve user record by user_id."""
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+            return dict(row) if row else None
+
+    def verify_user(self, identifier: str, password: str) -> Optional[Dict[str, Any]]:
+        """
+        Verify user credentials against stored password hash.
+        If valid, updates last_login timestamp and returns user dict (excluding password_hash).
+        """
+        user = self.get_user_by_username_or_email(identifier)
+        if not user:
+            return None
+
+        if check_password_hash(user["password_hash"], password):
+            now_iso = datetime.now(timezone.utc).isoformat()
+            with self.get_connection() as conn:
+                conn.execute(
+                    "UPDATE users SET last_login = ? WHERE user_id = ?",
+                    (now_iso, user["user_id"])
+                )
+            user_info = {
+                "user_id": user["user_id"],
+                "username": user["username"],
+                "email": user["email"],
+                "full_name": user.get("full_name") or user["username"],
+                "role": user["role"],
+                "last_login": now_iso
+            }
+            return user_info
+        return None
+
+    def list_users(self) -> List[Dict[str, Any]]:
+        """List all users without password hashes."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT user_id, full_name, username, email, role, created_at, last_login FROM users ORDER BY created_at ASC"
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def seed_default_admin(
+        self,
+        default_username: str = "admin",
+        default_password: str = "admin123",
+        default_email: str = "admin@antiforensics.local"
+    ) -> None:
+        """Seed a default administrator account if no users currently exist."""
+        try:
+            with self.get_connection() as conn:
+                count = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()["cnt"]
+                if count == 0:
+                    self.create_user(
+                        username=default_username,
+                        password=default_password,
+                        email=default_email,
+                        full_name="System Administrator",
+                        role="admin"
+                    )
+        except Exception:
+            pass
+
+

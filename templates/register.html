@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Create Account — Anti-Forensics Detection System</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="auth-page">
+    <div class="auth-background-effects">
+        <div class="glow-orb orb-1"></div>
+        <div class="glow-orb orb-2"></div>
+        <div class="grid-overlay"></div>
+    </div>
+
+    <div class="auth-wrapper">
+        <div class="auth-card">
+            <!-- Brand & Header -->
+            <div class="auth-header">
+                <div class="auth-brand-icon">🛡️</div>
+                <h1 class="auth-title">AntiForensics</h1>
+                <div class="auth-subtitle-badge">DFIR Investigation Suite</div>
+                <p class="auth-desc">Register a new investigator account</p>
+            </div>
+
+            <!-- Error Notification Alert -->
+            {% if error %}
+            <div class="auth-alert auth-alert-error" id="auth-error-alert">
+                <div class="alert-icon">⚠️</div>
+                <div class="alert-content">
+                    <strong>Registration Error</strong>
+                    <span>{{ error }}</span>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Registration Form -->
+            <form method="POST" action="/register" class="auth-form" id="register-form">
+                <!-- Full Name Field -->
+                <div class="auth-field-group">
+                    <label for="name" class="auth-label">
+                        <span>Full Name</span>
+                    </label>
+                    <div class="auth-input-wrapper">
+                        <span class="auth-input-icon">👤</span>
+                        <input
+                            type="text"
+                            id="name"
+                            name="name"
+                            class="auth-input"
+                            placeholder="e.g. John Doe"
+                            required
+                            autocomplete="name"
+                            autofocus
+                        >
+                    </div>
+                </div>
+
+                <!-- Email Address Field -->
+                <div class="auth-field-group">
+                    <label for="email" class="auth-label">
+                        <span>Email Address</span>
+                    </label>
+                    <div class="auth-input-wrapper">
+                        <span class="auth-input-icon">✉️</span>
+                        <input
+                            type="email"
+                            id="email"
+                            name="email"
+                            class="auth-input"
+                            placeholder="e.g. investigator@agency.gov"
+                            required
+                            autocomplete="email"
+                        >
+                    </div>
+                </div>
+
+                <!-- Password Field -->
+                <div class="auth-field-group">
+                    <label for="password" class="auth-label">
+                        <span>Password</span>
+                        <small class="auth-hint">(Minimum 6 characters)</small>
+                    </label>
+                    <div class="auth-input-wrapper">
+                        <span class="auth-input-icon">🔒</span>
+                        <input
+                            type="password"
+                            id="password"
+                            name="password"
+                            class="auth-input"
+                            placeholder="Create a strong password"
+                            required
+                            minlength="6"
+                            autocomplete="new-password"
+                        >
+                        <button type="button" class="btn-toggle-password" id="btn-toggle-pwd" title="Toggle password visibility" onclick="togglePasswordVisibility('password', this)">
+                            👁️
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Confirm Password Field -->
+                <div class="auth-field-group">
+                    <label for="confirm_password" class="auth-label">
+                        <span>Confirm Password</span>
+                    </label>
+                    <div class="auth-input-wrapper">
+                        <span class="auth-input-icon">🛡️</span>
+                        <input
+                            type="password"
+                            id="confirm_password"
+                            name="confirm_password"
+                            class="auth-input"
+                            placeholder="Re-enter your password"
+                            required
+                            minlength="6"
+                            autocomplete="new-password"
+                        >
+                        <button type="button" class="btn-toggle-password" id="btn-toggle-cpwd" title="Toggle confirm password visibility" onclick="togglePasswordVisibility('confirm_password', this)">
+                            👁️
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Action Button -->
+                <button type="submit" class="btn-auth-submit" id="btn-submit-register">
+                    <span class="btn-text">Create Account & Enter Portal</span>
+                    <span class="btn-arrow">→</span>
+                </button>
+            </form>
+
+            <!-- Switch to Login Link -->
+            <div class="auth-switch-box">
+                <span>Already have an account?</span>
+                <a href="/login" class="auth-link" id="link-goto-login">
+                    Log in here
+                </a>
+            </div>
+
+            <!-- Footer Meta -->
+            <div class="auth-card-footer">
+                <div class="security-badge">
+                    <span class="sec-dot"></span>
+                    <span>All passwords securely hashed using PBKDF2 with SHA-256 before storage</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function togglePasswordVisibility(inputId, btn) {
+            const pwdInput = document.getElementById(inputId);
+            if (pwdInput.type === 'password') {
+                pwdInput.type = 'text';
+                btn.textContent = '🙈';
+            } else {
+                pwdInput.type = 'password';
+                btn.textContent = '👁️';
+            }
+        }
+
+        // Form submit validation & feedback
+        document.getElementById('register-form').addEventListener('submit', function(e) {
+            const pwd = document.getElementById('password').value;
+            const cpwd = document.getElementById('confirm_password').value;
+            if (pwd !== cpwd) {
+                e.preventDefault();
+                alert("Passwords do not match. Please verify and try again.");
+                return false;
+            }
+            const btn = document.getElementById('btn-submit-register');
+            btn.classList.add('loading');
+            btn.querySelector('.btn-text').textContent = 'Creating account...';
+        });
+    </script>
+</body>
+</html>

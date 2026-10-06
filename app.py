@@ -28,7 +28,9 @@ db = DatabaseManager(db_path=DEFAULT_DB_PATH)
 
 @app.after_request
 def add_security_headers(response):
-    """Enforce strict no-cache headers for authenticated API endpoints to prevent local data leakage."""
+    """Enforce strict no-cache headers for authenticated API endpoints to prevent local data leakage.
+    PWA assets (sw.js, manifest.json, icons) are excluded — they manage their own cache headers.
+    """
     if request.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
@@ -198,6 +200,21 @@ def logout():
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
     return resp
+
+
+@app.route("/sw.js")
+def service_worker():
+    """
+    Serve the PWA service worker from the root path.
+    The service worker MUST be served from / (not /static/) so its scope
+    covers the entire application, including authenticated routes.
+    """
+    response = app.send_static_file("sw.js")
+    response.headers["Content-Type"] = "application/javascript"
+    response.headers["Service-Worker-Allowed"] = "/"
+    # Service worker file itself should not be cached by the browser long-term
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return response
 
 
 @app.route("/")

@@ -202,6 +202,20 @@ def logout():
     return resp
 
 
+@app.route("/manifest.json")
+def pwa_manifest():
+    """
+    Serve the PWA Web App Manifest with the CORRECT MIME type.
+    Chrome's installability checker requires Content-Type: application/manifest+json.
+    Flask's default static file serving uses application/json which can cause Chrome
+    to reject the manifest for PWA installability purposes.
+    """
+    response = app.send_static_file("manifest.json")
+    response.headers["Content-Type"] = "application/manifest+json; charset=utf-8"
+    response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.route("/sw.js")
 def service_worker():
     """

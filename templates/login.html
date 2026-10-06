@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Investigator Login — Anti-Forensics Detection System</title>
 
-    <!-- PWA Manifest -->
-    <link rel="manifest" href="/static/manifest.json">
+    <!-- PWA Manifest (served via dedicated Flask route with Content-Type: application/manifest+json) -->
+    <link rel="manifest" href="/manifest.json">
 
     <!-- PWA / Mobile App Meta -->
     <meta name="theme-color" content="#0f172a">
@@ -151,6 +151,25 @@
             btn.classList.add('loading');
             btn.querySelector('.btn-text').textContent = 'Verifying credentials...';
         });
+    </script>
+
+    <!-- PWA Service Worker Registration
+         CRITICAL: Must be on login.html because unauthenticated users land here first.
+         Chrome evaluates PWA installability on the current page — without SW registration
+         here, Chrome never sees an active service worker and never shows the Install prompt.
+         The SW itself is security-hardened: it never caches /api/*, auth, or evidence. -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('/sw.js', { scope: '/' })
+            .then(function (reg) {
+              console.log('[PWA] Service worker registered on login page. Scope:', reg.scope);
+            })
+            .catch(function (err) {
+              console.warn('[PWA] Service worker registration failed:', err);
+            });
+        });
+      }
     </script>
 </body>
 </html>

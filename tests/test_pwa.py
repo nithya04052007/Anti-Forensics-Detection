@@ -1,14 +1,29 @@
-"""PWA validation script — verifies all PWA assets and configuration are correct."""
-import json, os, sys
+"""
+PWA installability validation — updated for all 3 bug fixes:
+  1. Manifest served via /manifest.json with Content-Type: application/manifest+json
+  2. SW registration on login.html (critical — first page users see)
+  3. SW registration on register.html
+"""
+import json
+import os
+import sys
 
 errors = []
 passes = []
 
-def ok(msg): passes.append(msg); print(f"  PASS: {msg}")
-def fail(msg): errors.append(msg); print(f"  FAIL: {msg}")
+
+def ok(msg):
+    passes.append(msg)
+    print("  PASS: {}".format(msg))
+
+
+def fail(msg):
+    errors.append(msg)
+    print("  FAIL: {}".format(msg))
+
 
 # --- 1. Validate manifest.json ---
-print("\n[1] Checking manifest.json...")
+print("\n[1] Checking static/manifest.json...")
 manifest_path = "static/manifest.json"
 if not os.path.isfile(manifest_path):
     fail("manifest.json not found")
@@ -18,29 +33,24 @@ else:
     required = ["name", "short_name", "start_url", "scope", "display", "icons", "theme_color", "background_color"]
     missing = [k for k in required if k not in m]
     if missing:
-        fail(f"manifest missing fields: {missing}")
+        fail("manifest missing fields: {}".format(missing))
     else:
         ok("All required manifest fields present")
-    ok(f"name='{m.get('name')}' short_name='{m.get('short_name')}'")
-    ok(f"start_url='{m.get('start_url')}' scope='{m.get('scope')}' display='{m.get('display')}'")
-    ok(f"theme_color='{m.get('theme_color')}' background_color='{m.get('background_color')}'")
+    ok("name='{}' short_name='{}'".format(m.get("name"), m.get("short_name")))
+    ok("start_url='{}' scope='{}' display='{}'".format(m.get("start_url"), m.get("scope"), m.get("display")))
     for icon in m.get("icons", []):
-        ok(f"Icon declared: {icon['sizes']} | {icon['type']} | purpose={icon['purpose']}")
+        ok("Icon declared: {} | {} | purpose={}".format(icon["sizes"], icon["type"], icon["purpose"]))
 
 # --- 2. Check icon files ---
 print("\n[2] Checking icon files...")
-for fname, expected_min in [("static/icons/icon-192.png", 1000), ("static/icons/icon-512.png", 1000)]:
-    if os.path.isfile(fname):
-        size = os.path.getsize(fname)
-        if size >= expected_min:
-            ok(f"{fname} exists ({size} bytes)")
-        else:
-            fail(f"{fname} exists but suspiciously small ({size} bytes)")
+for fname in ["static/icons/icon-192.png", "static/icons/icon-512.png"]:
+    if os.path.isfile(fname) and os.path.getsize(fname) > 1000:
+        ok("{} exists ({} bytes)".format(fname, os.path.getsize(fname)))
     else:
-        fail(f"{fname} MISSING")
+        fail("{} MISSING or too small".format(fname))
 
 # --- 3. Check service worker ---
-print("\n[3] Checking service worker (static/sw.js)...")
+print("\n[3] Checking static/sw.js...")
 sw_path = "static/sw.js"
 if not os.path.isfile(sw_path):
     fail("static/sw.js not found")
@@ -48,64 +58,63 @@ else:
     ok("static/sw.js exists")
     with open(sw_path) as f:
         sw = f.read()
-    checks = {
+    for name, result in {
         "CACHE_NAME defined": "CACHE_NAME" in sw,
         "install handler": "install" in sw,
         "activate handler": "activate" in sw,
         "fetch handler": "fetch" in sw,
         "API network-only rule": "/api/" in sw,
         "auth routes network-only": "/login" in sw,
-        "network-only comment": "network-only" in sw or "Never cache" in sw,
+        "network-only policy": "network-only" in sw,
         "skipWaiting": "skipWaiting" in sw,
         "clients.claim": "clients.claim" in sw,
-    }
-    for name, result in checks.items():
+    }.items():
         ok(name) if result else fail(name)
 
 # --- 4. Check HTML templates ---
 print("\n[4] Checking HTML templates...")
 templates = [
     ("templates/index.html", True),
-    ("templates/login.html", False),
-    ("templates/register.html", False),
+    ("templates/login.html", True),    # FIX: login MUST register SW
+    ("templates/register.html", True), # FIX: register MUST register SW
 ]
 for path, check_sw in templates:
     with open(path, encoding="utf-8") as f:
         c = f.read()
-    checks = {
-        "manifest.json link": "manifest.json" in c,
+    for name, result in {
+        "manifest link to /manifest.json": 'href="/manifest.json"' in c,
+        "NOT /static/manifest.json": '/static/manifest.json' not in c,
         "theme-color meta": "theme-color" in c,
         "apple-mobile-web-app-capable": "apple-mobile-web-app-capable" in c,
         "apple-touch-icon": "apple-touch-icon" in c,
         "viewport-fit=cover": "viewport-fit=cover" in c,
-    }
-    if check_sw:
-        checks["serviceWorker registration"] = "serviceWorker" in c
-        checks["sw.js register call"] = "sw.js" in c
-    for name, result in checks.items():
-        label = f"{os.path.basename(path)}: {name}"
-        ok(label) if result else fail(label)
+        "serviceWorker registration": "serviceWorker" in c,
+        "sw.js register call": "sw.js" in c,
+    }.items():
+        ok("{}: {}".format(os.path.basename(path), name)) if result else fail("{}: {}".format(os.path.basename(path), name))
 
-# --- 5. Check Flask app ---
+# --- 5. Check Flask app.py ---
 print("\n[5] Checking app.py...")
-with open("app.py") as f:
+with open("app.py", encoding="utf-8") as f:
     app_src = f.read()
-app_checks = {
-    "/sw.js route": "@app.route(\"/sw.js\")" in app_src,
+for name, result in {
+    "/manifest.json route": '@app.route("/manifest.json")' in app_src,
+    "pwa_manifest function": "def pwa_manifest" in app_src,
+    "application/manifest+json MIME": "application/manifest+json" in app_src,
+    "/sw.js route": '@app.route("/sw.js")' in app_src,
     "service_worker function": "def service_worker" in app_src,
     "Service-Worker-Allowed header": "Service-Worker-Allowed" in app_src,
-    "send_static_file sw.js": "send_static_file(\"sw.js\")" in app_src,
-}
-for name, result in app_checks.items():
-    ok(f"app.py: {name}") if result else fail(f"app.py: {name}")
+    "send_static_file sw.js": 'send_static_file("sw.js")' in app_src,
+}.items():
+    ok("app.py: {}".format(name)) if result else fail("app.py: {}".format(name))
 
 # --- Summary ---
-print(f"\n{'='*50}")
-print(f"RESULT: {len(passes)} passed, {len(errors)} failed")
+print("\n" + "=" * 55)
+print("RESULT: {} passed, {} failed".format(len(passes), len(errors)))
 if errors:
     print("FAILURES:")
     for e in errors:
-        print(f"  - {e}")
+        print("  - {}".format(e))
     sys.exit(1)
 else:
-    print("ALL PWA CHECKS PASSED")
+    print("ALL PWA INSTALLABILITY CHECKS PASSED")

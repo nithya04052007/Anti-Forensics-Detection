@@ -208,9 +208,6 @@ function formatScanType(type) {
 // Phase 2: User File/Folder Selection via Native Windows File Explorer
 // ============================================================================
 
-let stagedFile = null;
-let stagedFolderFiles = null;
-
 function openStartScanFlow() {
     openScanModal();
 }

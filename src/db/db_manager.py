@@ -1,12 +1,12 @@
 """
 Database Manager for Anti-Forensics Detection System
-Handles SQLite schema creation, CRUD operations, transactions, and feature matrix export.
+Handles SQLite schema creation, CRUD operations, transactions, user-isolated persistent scan history, and feature matrix export.
 """
 
 import sqlite3
 import json
 import os
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timezone
 import pandas as pd
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -15,8 +15,10 @@ from ..collection.models import Finding, ScanResult
 
 
 class DatabaseManager:
-    def __init__(self, db_path: str = "anti_forensics.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[str] = None):
+        # Support DB path from argument, environment variable, or default
+        env_db = os.environ.get("DATABASE_PATH") or os.environ.get("DB_PATH") or os.environ.get("SQLITE_DB_PATH")
+        self.db_path = db_path or env_db or "anti_forensics.db"
         if os.path.dirname(self.db_path):
             os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         self._ensure_schema()
@@ -30,46 +32,59 @@ class DatabaseManager:
         return conn
 
     def _ensure_schema(self) -> None:
-        """Initialize SQLite database schema if tables do not exist."""
-        schema_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "schema.sql")
-        if not os.path.exists(schema_path):
-            # Fallback to local directory if relative path differs
-            schema_path = "schema.sql"
+        """Initialize SQLite database schema and run non-destructive migrations."""
+        # Run table definitions and migrations
+        self._create_inline_schema()
+        self._run_migrations()
 
-        if os.path.exists(schema_path):
-            with open(schema_path, "r", encoding="utf-8") as f:
-                schema_sql = f.read()
-            with self.get_connection() as conn:
-                conn.executescript(schema_sql)
-        else:
-            self._create_inline_schema()
-
-        # Graceful migration: ensure full_name column exists
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.execute("PRAGMA table_info(users)")
-                columns = [row["name"] for row in cursor.fetchall()]
-                if columns and "full_name" not in columns:
-                    conn.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
-        except Exception:
-            pass
 
     def _create_inline_schema(self) -> None:
         """Inline schema fallback in case schema.sql is not found."""
         with self.get_connection() as conn:
             conn.executescript("""
             PRAGMA foreign_keys = ON;
+
+            CREATE TABLE IF NOT EXISTS users (
+                user_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name       TEXT,
+                username        TEXT UNIQUE NOT NULL,
+                email           TEXT UNIQUE,
+                password_hash   TEXT NOT NULL,
+                role            TEXT NOT NULL DEFAULT 'analyst',
+                created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_login      TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS scans (
-                scan_id         TEXT PRIMARY KEY,
-                target_type     TEXT NOT NULL,
-                target_path     TEXT,
-                start_time      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                end_time        TIMESTAMP,
-                status          TEXT NOT NULL DEFAULT 'IN_PROGRESS',
-                total_artifacts INTEGER DEFAULT 0,
-                total_findings  INTEGER DEFAULT 0,
-                risk_score      REAL DEFAULT 0.0,
-                summary_json    TEXT
+                scan_id                 TEXT PRIMARY KEY,
+                user_id                 INTEGER,
+                target_type             TEXT NOT NULL,
+                target_path             TEXT,
+                filename                TEXT,
+                file_size               INTEGER DEFAULT 0,
+                file_type               TEXT,
+                sha256_hash             TEXT,
+                start_time              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                end_time                TIMESTAMP,
+                duration_seconds        REAL DEFAULT 0.0,
+                status                  TEXT NOT NULL DEFAULT 'IN_PROGRESS',
+                risk_score              REAL DEFAULT 0.0,
+                risk_level              TEXT DEFAULT 'LOW',
+                total_artifacts         INTEGER DEFAULT 0,
+                total_findings          INTEGER DEFAULT 0,
+                critical_count          INTEGER DEFAULT 0,
+                high_count              INTEGER DEFAULT 0,
+                evasion_findings_count  INTEGER DEFAULT 0,
+                ml_prediction           TEXT,
+                ml_probability          REAL DEFAULT 0.0,
+                ml_confidence           REAL DEFAULT 0.0,
+                report_path             TEXT,
+                detector_version        TEXT DEFAULT 'DFIR-Engine-v2.0',
+                summary_json            TEXT,
+                result_json             TEXT,
+                created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS findings (
@@ -95,37 +110,130 @@ class DatabaseManager:
                 FOREIGN KEY (scan_id) REFERENCES scans(scan_id) ON DELETE CASCADE,
                 UNIQUE(scan_id, feature_name)
             );
-
-            CREATE TABLE IF NOT EXISTS users (
-                user_id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                full_name       TEXT,
-                username        TEXT UNIQUE NOT NULL,
-                email           TEXT UNIQUE,
-                password_hash   TEXT NOT NULL,
-                role            TEXT NOT NULL DEFAULT 'analyst',
-                created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                last_login      TIMESTAMP
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
-            CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
             """)
 
+    def _run_migrations(self) -> None:
+        """Run non-destructive column additions and index creation on existing tables."""
+        with self.get_connection() as conn:
+            # 1. Users table migrations
+            try:
+                cursor = conn.execute("PRAGMA table_info(users)")
+                u_cols = {row["name"] for row in cursor.fetchall()}
+                if "full_name" not in u_cols:
+                    conn.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
+            except Exception:
+                pass
 
+            # 2. Scans table migrations
+            try:
+                cursor = conn.execute("PRAGMA table_info(scans)")
+                s_cols = {row["name"] for row in cursor.fetchall()}
+
+                new_columns = [
+                    ("user_id", "INTEGER"),
+                    ("filename", "TEXT"),
+                    ("file_size", "INTEGER DEFAULT 0"),
+                    ("file_type", "TEXT"),
+                    ("sha256_hash", "TEXT"),
+                    ("duration_seconds", "REAL DEFAULT 0.0"),
+                    ("risk_level", "TEXT DEFAULT 'LOW'"),
+                    ("critical_count", "INTEGER DEFAULT 0"),
+                    ("high_count", "INTEGER DEFAULT 0"),
+                    ("evasion_findings_count", "INTEGER DEFAULT 0"),
+                    ("ml_prediction", "TEXT"),
+                    ("ml_probability", "REAL DEFAULT 0.0"),
+                    ("ml_confidence", "REAL DEFAULT 0.0"),
+                    ("report_path", "TEXT"),
+                    ("detector_version", "TEXT DEFAULT 'DFIR-Engine-v2.0'"),
+                    ("result_json", "TEXT"),
+                    ("created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+                    ("updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                ]
+
+                for col_name, col_type in new_columns:
+                    if col_name not in s_cols:
+                        conn.execute(f"ALTER TABLE scans ADD COLUMN {col_name} {col_type}")
+
+                # Populate filename/risk_level for older records if blank
+                conn.execute("""
+                    UPDATE scans 
+                    SET filename = CASE 
+                        WHEN target_path IS NOT NULL AND target_path != '' THEN REPLACE(REPLACE(target_path, '\\', '/'), RTRIM(target_path, REPLACE(target_path, '\\', '/')), '')
+                        ELSE target_type 
+                    END
+                    WHERE filename IS NULL OR filename = ''
+                """)
+
+                conn.execute("""
+                    UPDATE scans 
+                    SET risk_level = CASE 
+                        WHEN risk_score >= 80.0 THEN 'CRITICAL'
+                        WHEN risk_score >= 61.0 THEN 'HIGH'
+                        WHEN risk_score >= 31.0 THEN 'MEDIUM'
+                        WHEN risk_score > 0.0 THEN 'LOW'
+                        ELSE 'CLEAN'
+                    END
+                    WHERE risk_level IS NULL OR risk_level = ''
+                """)
+
+                # If there are orphaned scans without user_id, associate them with admin (user_id=1)
+                conn.execute("UPDATE scans SET user_id = 1 WHERE user_id IS NULL AND (SELECT COUNT(*) FROM users WHERE user_id = 1) > 0")
+
+            except Exception:
+                pass
+
+            # 3. Create all indexes safely after columns are guaranteed to exist
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_scans_user_id ON scans(user_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_scans_user_start_time ON scans(user_id, start_time DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_scans_start_time ON scans(start_time DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_scans_created_at ON scans(created_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_scans_status ON scans(status)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_scans_risk_level ON scans(risk_level)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_scans_filename ON scans(filename)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_scan_id ON findings(scan_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_category ON findings(category)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_features_scan_id ON features(scan_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_features_name ON features(feature_name)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+            except Exception:
+                pass
 
     # =========================================================================
-    # Scan Management
+    # Scan Management & Persistent History
     # =========================================================================
 
-    def create_scan(self, scan_id: str, target_type: str, target_path: str = "") -> None:
-        """Record the initiation of a new scan session."""
+    def create_scan(
+        self,
+        scan_id: str,
+        target_type: str,
+        target_path: str = "",
+        user_id: Optional[int] = None,
+        filename: Optional[str] = None,
+        file_size: int = 0,
+        file_type: Optional[str] = None,
+        sha256_hash: Optional[str] = None,
+        detector_version: str = "DFIR-Engine-v2.0"
+    ) -> None:
+        """Record the initiation of a new persistent scan session linked to an authenticated user."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        display_name = filename or (os.path.basename(target_path) if target_path else target_type)
         with self.get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO scans (scan_id, target_type, target_path, start_time, status)
-                VALUES (?, ?, ?, ?, 'IN_PROGRESS')
+                INSERT INTO scans (
+                    scan_id, user_id, target_type, target_path, filename, file_size,
+                    file_type, sha256_hash, start_time, status, detector_version,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'IN_PROGRESS', ?, ?, ?)
                 """,
-                (scan_id, target_type, target_path, datetime.now(timezone.utc).isoformat())
+                (
+                    scan_id, user_id, target_type, target_path, display_name, file_size,
+                    file_type, sha256_hash, now_iso, detector_version, now_iso, now_iso
+                )
             )
 
     def complete_scan(
@@ -134,33 +242,144 @@ class DatabaseManager:
         total_artifacts: int,
         total_findings: int,
         risk_score: float,
-        summary: Dict[str, Any],
-        status: str = "COMPLETED"
+        summary: Optional[Dict[str, Any]] = None,
+        status: str = "COMPLETED",
+        risk_level: Optional[str] = None,
+        critical_count: int = 0,
+        high_count: int = 0,
+        evasion_findings_count: int = 0,
+        ml_prediction: Optional[str] = None,
+        ml_probability: float = 0.0,
+        ml_confidence: float = 0.0,
+        report_path: Optional[str] = None,
+        duration_seconds: Optional[float] = None,
+        result_json: Optional[Dict[str, Any]] = None,
+        sha256_hash: Optional[str] = None,
+        filename: Optional[str] = None,
+        file_size: Optional[int] = None,
+        file_type: Optional[str] = None
     ) -> None:
-        """Update scan metadata upon completion."""
+        """Update scan metadata upon completion with full persistent summary and snapshot."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        summary = summary or {}
+        
+        # Derive risk level if not explicitly provided
+        effective_risk_level = risk_level or summary.get("risk_level")
+        if not effective_risk_level:
+            if risk_score >= 80.0:
+                effective_risk_level = "CRITICAL"
+            elif risk_score >= 61.0:
+                effective_risk_level = "HIGH"
+            elif risk_score >= 31.0:
+                effective_risk_level = "MEDIUM"
+            elif risk_score > 0.0:
+                effective_risk_level = "LOW"
+            else:
+                effective_risk_level = "CLEAN"
+
+        eff_critical = critical_count or summary.get("critical_count", 0)
+        eff_high = high_count or summary.get("high_count", 0)
+        eff_evasion = evasion_findings_count or summary.get("suspicious_indicators", total_findings)
+        eff_ml_pred = ml_prediction or summary.get("ml_prediction", "Normal")
+        eff_ml_prob = ml_probability or summary.get("ml_probability", 0.0)
+        eff_ml_conf = ml_confidence or summary.get("ml_confidence_percent", 96.7)
+        eff_filename = filename or summary.get("file_name")
+        eff_size = file_size if file_size is not None else summary.get("file_size", 0)
+        eff_ext = file_type or summary.get("extension")
+        eff_hash = sha256_hash or summary.get("sha256") or summary.get("sha256_hash")
+
         with self.get_connection() as conn:
+            # Check existing start_time to calculate duration if duration_seconds is not provided
+            if duration_seconds is None:
+                row = conn.execute("SELECT start_time FROM scans WHERE scan_id = ?", (scan_id,)).fetchone()
+                if row and row["start_time"]:
+                    try:
+                        start_dt = datetime.fromisoformat(row["start_time"])
+                        duration_seconds = max(0.0, round((datetime.now(timezone.utc) - start_dt).total_seconds(), 2))
+                    except Exception:
+                        duration_seconds = 0.0
+                else:
+                    duration_seconds = 0.0
+
             conn.execute(
                 """
                 UPDATE scans
-                SET end_time = ?, status = ?, total_artifacts = ?,
-                    total_findings = ?, risk_score = ?, summary_json = ?
+                SET end_time = ?,
+                    duration_seconds = ?,
+                    status = ?,
+                    total_artifacts = ?,
+                    total_findings = ?,
+                    risk_score = ?,
+                    risk_level = ?,
+                    critical_count = ?,
+                    high_count = ?,
+                    evasion_findings_count = ?,
+                    ml_prediction = ?,
+                    ml_probability = ?,
+                    ml_confidence = ?,
+                    report_path = COALESCE(?, report_path),
+                    filename = COALESCE(?, filename),
+                    file_size = CASE WHEN ? > 0 THEN ? ELSE file_size END,
+                    file_type = COALESCE(?, file_type),
+                    sha256_hash = COALESCE(?, sha256_hash),
+                    summary_json = ?,
+                    result_json = ?,
+                    updated_at = ?
                 WHERE scan_id = ?
                 """,
                 (
-                    datetime.now(timezone.utc).isoformat(),
+                    now_iso,
+                    duration_seconds,
                     status,
                     total_artifacts,
                     total_findings,
                     round(risk_score, 2),
-                    json.dumps(summary),
+                    effective_risk_level,
+                    eff_critical,
+                    eff_high,
+                    eff_evasion,
+                    eff_ml_pred,
+                    eff_ml_prob,
+                    eff_ml_conf,
+                    report_path,
+                    eff_filename,
+                    eff_size, eff_size,
+                    eff_ext,
+                    eff_hash,
+                    json.dumps(summary) if summary else None,
+                    json.dumps(result_json) if result_json else None,
+                    now_iso,
                     scan_id
                 )
             )
 
-    def get_scan(self, scan_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve scan record by scan_id."""
+    def fail_scan(self, scan_id: str, error_message: str, user_id: Optional[int] = None) -> None:
+        """Mark a scan session as failed with error details recorded."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        err_summary = {"error": error_message, "failed_at": now_iso}
         with self.get_connection() as conn:
-            row = conn.execute("SELECT * FROM scans WHERE scan_id = ?", (scan_id,)).fetchone()
+            conn.execute(
+                """
+                UPDATE scans
+                SET end_time = ?, status = 'FAILED', summary_json = ?, updated_at = ?
+                WHERE scan_id = ?
+                """,
+                (now_iso, json.dumps(err_summary), now_iso, scan_id)
+            )
+
+    def get_scan(self, scan_id: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve scan record by scan_id with optional user_id isolation check.
+        Returns None if not found or if user does not have permission.
+        """
+        query = "SELECT * FROM scans WHERE scan_id = ?"
+        params = [scan_id]
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params.append(user_id)
+
+        with self.get_connection() as conn:
+            row = conn.execute(query, params).fetchone()
             if row:
                 d = dict(row)
                 if d.get("summary_json"):
@@ -168,15 +387,71 @@ class DatabaseManager:
                         d["summary"] = json.loads(d["summary_json"])
                     except Exception:
                         d["summary"] = {}
+                else:
+                    d["summary"] = {}
+
+                if d.get("result_json"):
+                    try:
+                        d["result"] = json.loads(d["result_json"])
+                    except Exception:
+                        d["result"] = None
+                else:
+                    d["result"] = None
                 return d
             return None
 
-    def list_scans(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """List historical scan executions."""
+    def list_scans(
+        self,
+        user_id: Optional[int] = None,
+        limit: int = 50,
+        offset: int = 0,
+        search: Optional[str] = None,
+        risk_level: Optional[str] = None,
+        status: Optional[str] = None,
+        sort_by: str = "newest"
+    ) -> List[Dict[str, Any]]:
+        """
+        List historical scan executions with user data isolation, search, filtering, and sorting.
+        """
+        query = "SELECT * FROM scans WHERE 1=1"
+        params: List[Any] = []
+
+        # User data isolation (strict user_id equality)
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params.append(user_id)
+
+        # Search filter (filename, target_path, scan_id, sha256_hash)
+        if search and search.strip():
+            clean_search = f"%{search.strip()}%"
+            query += " AND (filename LIKE ? OR target_path LIKE ? OR scan_id LIKE ? OR sha256_hash LIKE ?)"
+            params.extend([clean_search, clean_search, clean_search, clean_search])
+
+        # Risk level filter
+        if risk_level and risk_level.upper() != "ALL":
+            query += " AND UPPER(risk_level) = ?"
+            params.append(risk_level.strip().upper())
+
+        # Status filter
+        if status and status.upper() != "ALL":
+            query += " AND UPPER(status) = ?"
+            params.append(status.strip().upper())
+
+        # Sorting
+        if sort_by == "oldest":
+            query += " ORDER BY start_time ASC"
+        elif sort_by == "highest_risk":
+            query += " ORDER BY risk_score DESC, start_time DESC"
+        elif sort_by == "lowest_risk":
+            query += " ORDER BY risk_score ASC, start_time DESC"
+        else:  # default newest
+            query += " ORDER BY start_time DESC"
+
+        query += " LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
         with self.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM scans ORDER BY start_time DESC LIMIT ?", (limit,)
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
             results = []
             for row in rows:
                 d = dict(row)
@@ -185,8 +460,100 @@ class DatabaseManager:
                         d["summary"] = json.loads(d["summary_json"])
                     except Exception:
                         d["summary"] = {}
+                else:
+                    d["summary"] = {}
+
+                if d.get("result_json"):
+                    try:
+                        d["result"] = json.loads(d["result_json"])
+                    except Exception:
+                        d["result"] = None
+                else:
+                    d["result"] = None
                 results.append(d)
             return results
+
+    def count_scans(
+        self,
+        user_id: Optional[int] = None,
+        search: Optional[str] = None,
+        risk_level: Optional[str] = None,
+        status: Optional[str] = None
+    ) -> int:
+        """Count total matching scans for pagination."""
+        query = "SELECT COUNT(*) as total FROM scans WHERE 1=1"
+        params: List[Any] = []
+
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params.append(user_id)
+
+        if search and search.strip():
+            clean_search = f"%{search.strip()}%"
+            query += " AND (filename LIKE ? OR target_path LIKE ? OR scan_id LIKE ? OR sha256_hash LIKE ?)"
+            params.extend([clean_search, clean_search, clean_search, clean_search])
+
+        if risk_level and risk_level.upper() != "ALL":
+            query += " AND UPPER(risk_level) = ?"
+            params.append(risk_level.strip().upper())
+
+        if status and status.upper() != "ALL":
+            query += " AND UPPER(status) = ?"
+            params.append(status.strip().upper())
+
+        with self.get_connection() as conn:
+            row = conn.execute(query, params).fetchone()
+            return row["total"] if row else 0
+
+    def delete_scan(self, scan_id: str, user_id: Optional[int] = None) -> bool:
+        """
+        Safely delete a scan record and its cascaded findings & features with user verification.
+        Returns True if deleted, False if not found or unauthorized.
+        """
+        with self.get_connection() as conn:
+            if user_id is not None:
+                conn.execute(
+                    "DELETE FROM features WHERE scan_id IN (SELECT scan_id FROM scans WHERE scan_id = ? AND user_id = ?)",
+                    (scan_id, user_id)
+                )
+                conn.execute(
+                    "DELETE FROM findings WHERE scan_id IN (SELECT scan_id FROM scans WHERE scan_id = ? AND user_id = ?)",
+                    (scan_id, user_id)
+                )
+                cursor = conn.execute("DELETE FROM scans WHERE scan_id = ? AND user_id = ?", (scan_id, user_id))
+            else:
+                conn.execute("DELETE FROM features WHERE scan_id = ?", (scan_id,))
+                conn.execute("DELETE FROM findings WHERE scan_id = ?", (scan_id,))
+                cursor = conn.execute("DELETE FROM scans WHERE scan_id = ?", (scan_id,))
+            return cursor.rowcount > 0
+
+    def get_user_scan_stats(self, user_id: Optional[int] = None) -> Dict[str, Any]:
+        """Compute aggregated metrics specifically for the authenticated user."""
+        query = """
+        SELECT 
+            COUNT(*) as total_scans,
+            COALESCE(SUM(total_findings), 0) as total_findings,
+            COALESCE(SUM(CASE WHEN risk_level IN ('HIGH', 'CRITICAL') OR risk_score >= 61.0 THEN 1 ELSE 0 END), 0) as critical_findings,
+            COALESCE(AVG(risk_score), 0.0) as avg_risk_score
+        FROM scans
+        WHERE 1=1
+        """
+        params: List[Any] = []
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params.append(user_id)
+
+        with self.get_connection() as conn:
+            row = conn.execute(query, params).fetchone()
+            if row:
+                return {
+                    "total_scans": row["total_scans"],
+                    "total_findings": row["total_findings"],
+                    "critical_findings": row["critical_findings"],
+                    "high_risk_scans": row["critical_findings"],
+                    "avg_risk_score": round(row["avg_risk_score"], 1)
+                }
+            return {"total_scans": 0, "total_findings": 0, "critical_findings": 0, "high_risk_scans": 0, "avg_risk_score": 0.0}
 
     # =========================================================================
     # Findings Management
@@ -248,20 +615,29 @@ class DatabaseManager:
         self,
         scan_id: str,
         category: Optional[str] = None,
-        severity: Optional[str] = None
+        severity: Optional[str] = None,
+        user_id: Optional[int] = None
     ) -> List[Dict[str, Any]]:
-        """Retrieve findings for a scan with optional category and severity filtering."""
-        query = "SELECT * FROM findings WHERE scan_id = ?"
-        params = [scan_id]
+        """Retrieve findings for a scan with optional category, severity, and user_id filtering."""
+        if user_id is not None:
+            query = """
+            SELECT f.* FROM findings f
+            JOIN scans s ON f.scan_id = s.scan_id
+            WHERE f.scan_id = ? AND s.user_id = ?
+            """
+            params: List[Any] = [scan_id, user_id]
+        else:
+            query = "SELECT * FROM findings WHERE scan_id = ?"
+            params = [scan_id]
 
         if category:
-            query += " AND category = ?"
+            query += " AND f.category = ?" if user_id is not None else " AND category = ?"
             params.append(category)
         if severity:
-            query += " AND severity = ?"
+            query += " AND f.severity = ?" if user_id is not None else " AND severity = ?"
             params.append(severity)
 
-        query += " ORDER BY created_at ASC"
+        query += " ORDER BY f.created_at ASC" if user_id is not None else " ORDER BY created_at ASC"
 
         with self.get_connection() as conn:
             rows = conn.execute(query, params).fetchall()
@@ -315,16 +691,25 @@ class DatabaseManager:
                 data
             )
 
-    def get_features(self, scan_id: str) -> Dict[str, float]:
-        """Retrieve features for a single scan as a dictionary."""
+    def get_features(self, scan_id: str, user_id: Optional[int] = None) -> Dict[str, float]:
+        """Retrieve features for a single scan as a dictionary with user verification."""
         with self.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT feature_name, feature_value FROM features WHERE scan_id = ?",
-                (scan_id,)
-            ).fetchall()
+            if user_id is not None:
+                query = """
+                SELECT f.feature_name, f.feature_value
+                FROM features f
+                JOIN scans s ON f.scan_id = s.scan_id
+                WHERE f.scan_id = ? AND s.user_id = ?
+                """
+                params = (scan_id, user_id)
+            else:
+                query = "SELECT feature_name, feature_value FROM features WHERE scan_id = ?"
+                params = (scan_id,)
+
+            rows = conn.execute(query, params).fetchall()
             return {row["feature_name"]: row["feature_value"] for row in rows}
 
-    def get_features_dataframe(self, scan_id: Optional[str] = None) -> pd.DataFrame:
+    def get_features_dataframe(self, scan_id: Optional[str] = None, user_id: Optional[int] = None) -> pd.DataFrame:
         """
         Pivot the features table into a wide pandas DataFrame (1 row per scan_id, columns as features).
         Ideal for training or inference with ML classifiers (Random Forest, XGBoost, etc.).
@@ -333,11 +718,15 @@ class DatabaseManager:
         SELECT f.scan_id, s.target_type, s.risk_score, f.feature_name, f.feature_value
         FROM features f
         JOIN scans s ON f.scan_id = s.scan_id
+        WHERE 1=1
         """
         params = []
         if scan_id:
-            query += " WHERE f.scan_id = ?"
+            query += " AND f.scan_id = ?"
             params.append(scan_id)
+        if user_id is not None:
+            query += " AND s.user_id = ?"
+            params.append(user_id)
 
         with self.get_connection() as conn:
             df = pd.read_sql_query(query, conn, params=params)

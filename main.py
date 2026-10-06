@@ -44,18 +44,31 @@ def run_pipeline(
     memory_artifacts: List[MemoryArtifact],
     memory_dump_path: Optional[str] = None,
     yara_rules_path: Optional[str] = None,
-    db_path: str = "anti_forensics.db",
-    export_features_path: Optional[str] = None
+    db_path: Optional[str] = None,
+    export_features_path: Optional[str] = None,
+    user_id: Optional[int] = None
 ) -> ScanResult:
     """Execute end-to-end DFIR analysis, feature extraction, and database persistence."""
+    start_perf = datetime.now()
     scan_id = str(uuid.uuid4())
+    effective_db = db_path or os.environ.get("DATABASE_PATH") or os.environ.get("DB_PATH") or "anti_forensics.db"
+
     ForensicLogger.header("AUTOMATED ANTI-FORENSICS DETECTION SYSTEM")
     ForensicLogger.info(f"Initiating Forensic Scan: {scan_id}")
     ForensicLogger.info(f"Target Type: {target_type} | Target: {target_path or 'Local System'}")
 
+    display_name = os.path.basename(target_path) if target_path else target_type
+
     # 1. Initialize Database
-    db = DatabaseManager(db_path=db_path)
-    db.create_scan(scan_id, target_type, target_path)
+    db = DatabaseManager(db_path=effective_db)
+    db.create_scan(
+        scan_id=scan_id,
+        target_type=target_type,
+        target_path=target_path,
+        user_id=user_id,
+        filename=display_name,
+        detector_version="DFIR-Pipeline-v2.0"
+    )
 
     findings: List[Finding] = []
 
@@ -138,14 +151,41 @@ def run_pipeline(
     db.insert_findings_batch(scan_id, findings)
     db.insert_features(scan_id, features)
 
+    crit_count = sum(1 for f in findings if f.severity == "CRITICAL")
+    high_count = sum(1 for f in findings if f.severity == "HIGH")
+    risk_level = "CRITICAL" if risk_score >= 80 else ("HIGH" if risk_score >= 61 else ("MEDIUM" if risk_score >= 31 else "LOW"))
+
+    end_perf = datetime.now()
+    duration_s = max(0.01, round((end_perf - start_perf).total_seconds(), 2))
+
     summary = {
+        "file_name": display_name,
         "files_scanned": len(files),
         "logs_scanned": len(event_logs),
         "registry_keys_audited": len(registry_keys),
         "findings_count": len(findings),
         "risk_score": risk_score,
-        "critical_count": sum(1 for f in findings if f.severity == "CRITICAL"),
-        "high_count": sum(1 for f in findings if f.severity == "HIGH")
+        "risk_level": risk_level,
+        "critical_count": crit_count,
+        "high_count": high_count,
+        "suspicious_indicators": len(findings),
+        "ml_prediction": "Suspicious" if risk_score >= 50.0 else "Normal",
+        "ml_probability": round(risk_score / 100.0, 3)
+    }
+
+    result_snapshot = {
+        "scan_id": scan_id,
+        "user_id": user_id,
+        "target_type": target_type,
+        "target_path": target_path,
+        "file_name": display_name,
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "duration_seconds": duration_s,
+        "total_findings": len(findings),
+        "summary": summary,
+        "findings": [f.to_dict() for f in findings],
+        "features": features
     }
 
     db.complete_scan(
@@ -154,9 +194,18 @@ def run_pipeline(
         total_findings=len(findings),
         risk_score=risk_score,
         summary=summary,
-        status="COMPLETED"
+        status="COMPLETED",
+        risk_level=risk_level,
+        critical_count=crit_count,
+        high_count=high_count,
+        evasion_findings_count=len(findings),
+        ml_prediction=summary["ml_prediction"],
+        ml_probability=summary["ml_probability"],
+        duration_seconds=duration_s,
+        result_json=result_snapshot,
+        filename=display_name
     )
-    ForensicLogger.success(f"Scan results, {len(findings)} findings, and {len(features)} ML features saved to '{db_path}'.")
+    ForensicLogger.success(f"Scan results, {len(findings)} findings, and {len(features)} ML features saved to '{effective_db}'.")
 
     # 10. Optional Feature Export to CSV
     if export_features_path:

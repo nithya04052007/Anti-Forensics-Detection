@@ -113,3 +113,24 @@ def predict_risk(feature_dict: Dict[str, float], findings_count: int = 0) -> Dic
             "total": total_score
         }
     }
+
+
+def get_model_metadata() -> Dict[str, Any]:
+    """
+    Retrieve real Random Forest model architecture metadata and exact feature importances.
+    Returns actual weights computed during model training.
+    """
+    model, feature_cols = load_trained_model()
+    importances = {}
+    if hasattr(model, "feature_importances_"):
+        for col, imp in zip(feature_cols, model.feature_importances_):
+            importances[col] = round(float(imp), 4)
+
+    return {
+        "model_type": "Random Forest Classifier",
+        "n_estimators": getattr(model, "n_estimators", 100),
+        "criterion": getattr(model, "criterion", "gini"),
+        "feature_count": len(feature_cols),
+        "feature_names": feature_cols,
+        "feature_importances": importances
+    }

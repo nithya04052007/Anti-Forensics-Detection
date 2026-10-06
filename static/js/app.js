@@ -1,66 +1,160 @@
 /**
- * Anti-Forensics Detection System — Frontend JavaScript (Phase 2)
+ * Anti-Forensics Detection System — Frontend JavaScript (Phase 2 & Persistent History)
  * Handles user file selection via Windows File Explorer, live scan execution,
- * dynamic dashboard rendering, Scan History, and PDF report downloads.
+ * dynamic dashboard rendering, persistent Scan History, user isolation, and PDF reports.
  */
 
 let currentScans = [];
 let selectedScanId = null;
+let currentScanResult = null;
+let cachedModelMetadata = null;
 let selectedFilePath = null;
 let currentView = 'dashboard';
+let stagedFile = null;
+let stagedFolderFiles = null;
+
+// History Pagination & Filtering State
+let currentHistoryPage = 1;
+let totalHistoryPages = 1;
+let historySearchDebounceTimer = null;
+let pendingDeleteScanId = null;
 
 document.addEventListener('DOMContentLoaded', () => {
+    // Purge any stale client-side cache across sessions
+    try {
+        sessionStorage.clear();
+    } catch (e) {}
     loadScans();
 });
 
+function logoutUser(event) {
+    if (event) event.preventDefault();
+    try {
+        sessionStorage.clear();
+        localStorage.clear();
+    } catch (e) {}
+    resetDetailsPanel();
+    window.location.href = '/logout';
+}
+
+function resetDetailsPanel() {
+    selectedScanId = null;
+    currentScanResult = null;
+    stagedFile = null;
+    stagedFolderFiles = null;
+    selectedFilePath = null;
+
+    const scanTitle = document.getElementById('selected-scan-title');
+    if (scanTitle) scanTitle.innerText = 'Evidence File Inspection';
+    const scanMeta = document.getElementById('selected-scan-meta');
+    if (scanMeta) scanMeta.innerText = 'Select a scan or click "Start New Scan" above';
+
+    const detailsActions = document.getElementById('details-actions');
+    if (detailsActions) detailsActions.style.display = 'none';
+
+    const riskBar = document.getElementById('risk-overview-bar');
+    if (riskBar) riskBar.style.display = 'none';
+
+    const metaCard = document.getElementById('evidence-meta-card');
+    if (metaCard) metaCard.style.display = 'none';
+
+    const mlCard = document.getElementById('ml-prediction-card');
+    if (mlCard) mlCard.style.display = 'none';
+
+    const findingsWrap = document.getElementById('findings-table-wrap');
+    if (findingsWrap) {
+        findingsWrap.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">🛡️</div>
+                <h4>No Scan Active</h4>
+                <p>Click <b>Start New Scan</b> above to select a file from Windows File Explorer or choose a past scan from the list.</p>
+            </div>
+        `;
+    }
+
+    const bannerPath = document.getElementById('banner-path-text');
+    if (bannerPath) bannerPath.innerHTML = 'No evidence file selected yet. Click below to browse Windows File Explorer.';
+
+    const scanBtn = document.getElementById('btn-run-scan');
+    if (scanBtn) scanBtn.style.display = 'none';
+
+    // Also reset dedicated ML Feature Matrix View
+    const mlNoScan = document.getElementById('ml-no-scan-state');
+    if (mlNoScan) mlNoScan.style.display = 'block';
+    const mlContainer = document.getElementById('ml-selected-scan-container');
+    if (mlContainer) mlContainer.style.display = 'none';
+    const mlActions = document.getElementById('ml-view-actions');
+    if (mlActions) mlActions.style.display = 'none';
+}
+
 // ============================================================================
-// Data Fetching & Scans Management
+// Data Fetching & Scans Management (Dashboard Recent Scans)
 // ============================================================================
 
 async function loadScans() {
     const container = document.getElementById('scans-container');
-    container.innerHTML = '<div class="loading-state">Loading scan sessions...</div>';
+    if (container) {
+        container.innerHTML = '<div class="loading-state">Loading recent scan records...</div>';
+    }
 
     try {
-        const res = await fetch('/api/scans');
+        const res = await fetch('/api/scans?limit=10', { cache: 'no-store' });
         const data = await res.json();
 
-        if (data.status === 'success' && data.scans) {
-            currentScans = data.scans;
+        if (data.status === 'success') {
+            currentScans = data.scans || [];
             renderScansList(currentScans);
-            updateDashboardMetrics(currentScans);
-            renderHistoryTable(currentScans);
+            updateDashboardMetrics(data.stats, data.total);
 
-            if (currentScans.length > 0 && !selectedScanId) {
-                selectScan(currentScans[0].scan_id);
+            const badge = document.getElementById('recent-scans-total-badge');
+            if (badge) {
+                badge.innerText = data.total !== undefined ? data.total : currentScans.length;
+            }
+
+            if (currentScans.length > 0) {
+                const exists = currentScans.some(s => s.scan_id === selectedScanId);
+                if (!selectedScanId || !exists) {
+                    selectScan(currentScans[0].scan_id);
+                }
+            } else {
+                // Strict user data isolation: if this account has 0 scans, wipe inspection panel completely
+                resetDetailsPanel();
             }
         } else {
-            container.innerHTML = '<div class="empty-state">No scans recorded yet.</div>';
+            resetDetailsPanel();
+            if (container) container.innerHTML = '<div class="empty-state"><p>No scans recorded yet.</p></div>';
         }
     } catch (err) {
-        container.innerHTML = '<div class="empty-state">Error loading scans from SQLite database.</div>';
+        console.error("Error loading scans:", err);
+        resetDetailsPanel();
+        if (container) container.innerHTML = '<div class="empty-state"><p>Error connecting to database.</p></div>';
     }
 }
 
-function updateDashboardMetrics(scans) {
-    document.getElementById('stat-total-scans').innerText = scans.length;
-
-    let totalFindings = 0;
-    let criticalFindings = 0;
-
-    scans.forEach(s => {
-        totalFindings += (s.total_findings || 0);
-        if (s.summary && (s.summary.critical_count || s.summary.risk_level === 'HIGH')) {
-            criticalFindings += 1;
-        }
-    });
-
-    document.getElementById('stat-total-findings').innerText = totalFindings;
-    document.getElementById('stat-critical-findings').innerText = criticalFindings;
+function updateDashboardMetrics(stats, totalCount) {
+    if (stats) {
+        document.getElementById('stat-total-scans').innerText = stats.total_scans !== undefined ? stats.total_scans : (totalCount || 0);
+        document.getElementById('stat-total-findings').innerText = stats.total_findings || 0;
+        document.getElementById('stat-critical-findings').innerText = stats.critical_findings || 0;
+    } else if (currentScans) {
+        document.getElementById('stat-total-scans').innerText = totalCount || currentScans.length;
+        let totalFindings = 0;
+        let criticalFindings = 0;
+        currentScans.forEach(s => {
+            totalFindings += (s.total_findings || 0);
+            if (s.risk_level === 'HIGH' || s.risk_level === 'CRITICAL' || s.risk_score >= 61.0) {
+                criticalFindings += 1;
+            }
+        });
+        document.getElementById('stat-total-findings').innerText = totalFindings;
+        document.getElementById('stat-critical-findings').innerText = criticalFindings;
+    }
 }
 
 function renderScansList(scans) {
     const container = document.getElementById('scans-container');
+    if (!container) return;
+
     if (!scans || scans.length === 0) {
         container.innerHTML = '<div class="empty-state"><p>No scans found. Click "Start New Scan" to begin.</p></div>';
         return;
@@ -74,20 +168,26 @@ function renderScansList(scans) {
         item.onclick = () => selectScan(s.scan_id);
 
         const risk = s.risk_score || 0;
-        let riskClass = 'risk-low';
-        if (risk >= 61) riskClass = 'risk-high';
-        else if (risk >= 31) riskClass = 'risk-med';
+        const riskLevel = (s.risk_level || (risk >= 80 ? 'CRITICAL' : (risk >= 61 ? 'HIGH' : (risk >= 31 ? 'MEDIUM' : (risk > 0 ? 'LOW' : 'CLEAN'))))).toUpperCase();
 
-        const timeStr = s.start_time ? new Date(s.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-';
-        const targetName = s.summary?.file_name || s.target_path ? (s.summary?.file_name || s.target_path.split(/[\\/]/).pop()) : formatScanType(s.target_type);
+        let riskClass = 'risk-low';
+        if (riskLevel === 'CRITICAL' || risk >= 80) riskClass = 'risk-critical';
+        else if (riskLevel === 'HIGH' || risk >= 61) riskClass = 'risk-high';
+        else if (riskLevel === 'MEDIUM' || risk >= 31) riskClass = 'risk-med';
+        else if (riskLevel === 'CLEAN' || risk === 0) riskClass = 'risk-clean';
+
+        const timeStr = s.start_time ? new Date(s.start_time).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + new Date(s.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-';
+        const targetName = s.filename || s.summary?.file_name || (s.target_path ? s.target_path.split(/[\\/]/).pop() : formatScanType(s.target_type));
+
+        const statusTag = s.status === 'FAILED' ? '<span class="scan-item-status-tag status-failed">FAILED</span>' : '';
 
         item.innerHTML = `
             <div class="scan-item-header">
-                <span class="scan-item-type" title="${s.target_path || ''}">${targetName}</span>
-                <span class="scan-item-risk ${riskClass}">Risk: ${risk.toFixed(0)}</span>
+                <span class="scan-item-type" title="${s.target_path || targetName}">${targetName}</span>
+                <span class="scan-item-risk ${riskClass}">${riskLevel}: ${risk.toFixed(0)}</span>
             </div>
             <div class="scan-item-meta">
-                <span>Findings: ${s.total_findings}</span> • <span>${timeStr}</span>
+                <span>${s.total_findings || 0} findings</span> • <span>${timeStr}</span> ${statusTag}
             </div>
         `;
         container.appendChild(item);
@@ -100,16 +200,16 @@ function formatScanType(type) {
         case 'demo_simulation': return '⚡ Demo Simulation';
         case 'filesystem': return '📁 Directory Scan';
         case 'live_system': return '💻 Live Host Audit';
-        default: return type || 'Scan';
+        default: return type || 'Evidence Scan';
     }
 }
-
-let stagedFile = null;
-let stagedFolderFiles = null;
 
 // ============================================================================
 // Phase 2: User File/Folder Selection via Native Windows File Explorer
 // ============================================================================
+
+let stagedFile = null;
+let stagedFolderFiles = null;
 
 function openStartScanFlow() {
     openScanModal();
@@ -275,7 +375,7 @@ async function executeFolderScan() {
 }
 
 // ============================================================================
-// Selected Scan Details Rendering
+// Selected Scan Details Rendering (100% Fidelity Snapshot)
 // ============================================================================
 
 async function selectScan(scanId) {
@@ -286,36 +386,57 @@ async function selectScan(scanId) {
     if (selectedEl) selectedEl.classList.add('selected');
 
     try {
-        const res = await fetch(`/api/scan/${scanId}`);
+        const res = await fetch(`/api/scan/${scanId}`, { cache: 'no-store' });
         const data = await res.json();
 
         if (data.status === 'success') {
             const scan = data.scan;
             const summary = scan.summary || {};
 
-            const compositeResult = {
-                scan_id: scan.scan_id,
-                scan_date: scan.start_time,
-                file_name: summary.file_name || (scan.target_path ? scan.target_path.split(/[\\/]/).pop() : 'Evidence Target'),
-                file_path: scan.target_path || 'N/A',
-                file_size: summary.file_size || 0,
-                extension: summary.extension || '-',
-                signature_type: summary.signature_type || 'Unknown',
-                extension_match: summary.extension_match !== undefined ? summary.extension_match : true,
-                is_hidden: summary.is_hidden || false,
-                created_time: summary.created_time || '-',
-                modified_time: summary.modified_time || '-',
-                accessed_time: summary.accessed_time || '-',
-                risk_score: scan.risk_score || 0.0,
-                risk_level: summary.risk_level || (scan.risk_score >= 61 ? 'HIGH' : (scan.risk_score >= 31 ? 'MEDIUM' : 'LOW')),
-                ml_prediction: summary.ml_prediction || (scan.risk_score >= 50 ? 'Suspicious' : 'Normal'),
-                ml_probability: summary.ml_probability || (scan.risk_score / 100.0),
-                ml_confidence_percent: 96.7,
-                findings: data.findings || [],
-                features: data.features || {}
-            };
+            if (data.model_metadata) {
+                cachedModelMetadata = data.model_metadata;
+            }
 
+            let compositeResult;
+            if (data.result) {
+                compositeResult = data.result;
+            } else {
+                const risk = scan.risk_score || 0.0;
+                const riskLevel = scan.risk_level || summary.risk_level || (risk >= 80 ? 'CRITICAL' : (risk >= 61 ? 'HIGH' : (risk >= 31 ? 'MEDIUM' : (risk > 0 ? 'LOW' : 'CLEAN'))));
+                const fileName = scan.filename || summary.file_name || (scan.target_path ? scan.target_path.split(/[\\/]/).pop() : 'Evidence Target');
+
+                compositeResult = {
+                    scan_id: scan.scan_id,
+                    scan_date: scan.start_time,
+                    file_name: fileName,
+                    file_path: scan.target_path || 'N/A',
+                    file_size: scan.file_size || summary.file_size || 0,
+                    extension: scan.file_type || summary.extension || '-',
+                    signature_type: summary.signature_type || 'Unknown',
+                    extension_match: summary.extension_match !== undefined ? summary.extension_match : true,
+                    is_hidden: summary.is_hidden || false,
+                    sha256_hash: scan.sha256_hash || summary.sha256 || summary.sha256_hash || 'N/A',
+                    created_time: summary.created_time || '-',
+                    modified_time: summary.modified_time || '-',
+                    accessed_time: summary.accessed_time || '-',
+                    risk_score: risk,
+                    risk_level: riskLevel,
+                    ml_prediction: scan.ml_prediction || summary.ml_prediction || (risk >= 50 ? 'Suspicious' : 'Normal'),
+                    ml_probability: scan.ml_probability !== undefined ? scan.ml_probability : (summary.ml_probability || (risk / 100.0)),
+                    ml_confidence_percent: scan.ml_confidence || summary.ml_confidence_percent || 96.7,
+                    findings: data.findings || [],
+                    features: data.features || {}
+                };
+            }
+
+            currentScanResult = compositeResult;
             displayScanResult(compositeResult);
+
+            if (currentView === 'features') {
+                renderMLFeatureMatrixView(compositeResult, cachedModelMetadata);
+            }
+        } else {
+            console.error("Scan details error:", data.message);
         }
     } catch (err) {
         console.error("Error loading scan details:", err);
@@ -324,20 +445,25 @@ async function selectScan(scanId) {
 
 function displayScanResult(result) {
     selectedScanId = result.scan_id;
+    currentScanResult = result;
 
-    document.getElementById('selected-scan-title').innerText = `${result.file_name} (${(result.file_size / 1024).toFixed(1)} KB)`;
-    document.getElementById('selected-scan-meta').innerText = `Scan ID: ${result.scan_id} | Assessed: ${result.scan_date || result.created_time}`;
+    const sizeFormatted = result.file_size > 1024 * 1024 
+        ? `${(result.file_size / (1024 * 1024)).toFixed(2)} MB` 
+        : `${((result.file_size || 0) / 1024).toFixed(1)} KB`;
+
+    document.getElementById('selected-scan-title').innerText = `${result.file_name} (${sizeFormatted})`;
+    document.getElementById('selected-scan-meta').innerText = `Scan ID: ${result.scan_id} | Scanned: ${result.scan_date || result.created_time || '-'}`;
     document.getElementById('details-actions').style.display = 'flex';
 
     // 1. Risk Overview & Gauge
     const riskBar = document.getElementById('risk-overview-bar');
     riskBar.style.display = 'flex';
     const riskScore = result.risk_score || 0.0;
-    document.getElementById('risk-meter-fill').style.width = `${Math.min(100, riskScore)}%`;
+    document.getElementById('risk-meter-fill').style.width = `${Math.min(100, Math.max(0, riskScore))}%`;
     document.getElementById('risk-meter-text').innerText = `${riskScore.toFixed(1)} / 100`;
 
     const riskBadge = document.getElementById('risk-level-badge');
-    const riskLevel = (result.risk_level || (riskScore >= 61 ? 'HIGH' : (riskScore >= 31 ? 'MEDIUM' : 'LOW'))).toUpperCase();
+    const riskLevel = (result.risk_level || (riskScore >= 80 ? 'CRITICAL' : (riskScore >= 61 ? 'HIGH' : (riskScore >= 31 ? 'MEDIUM' : (riskScore > 0 ? 'LOW' : 'CLEAN'))))).toUpperCase();
     riskBadge.innerText = `${riskLevel} RISK`;
     riskBadge.className = `risk-level-badge level-${riskLevel.toLowerCase()}`;
 
@@ -353,12 +479,13 @@ function displayScanResult(result) {
     if (counts.HIGH > 0) breakdown.innerHTML += `<span class="badge badge-high">${counts.HIGH} High</span>`;
     if (counts.MEDIUM > 0) breakdown.innerHTML += `<span class="badge badge-medium">${counts.MEDIUM} Medium</span>`;
     if (counts.LOW > 0) breakdown.innerHTML += `<span class="badge badge-low">${counts.LOW} Low</span>`;
+    if ((result.findings || []).length === 0) breakdown.innerHTML += `<span class="badge badge-clean">Clean Baseline</span>`;
 
     // 2. Evidence Properties Card
     document.getElementById('evidence-meta-card').style.display = 'block';
     document.getElementById('meta-file-name').innerText = result.file_name || '-';
     document.getElementById('meta-file-size').innerText = `${(result.file_size || 0).toLocaleString()} bytes`;
-    document.getElementById('meta-extension').innerText = result.extension || '-';
+    document.getElementById('meta-extension').innerText = result.extension || result.metadata?.extension || '-';
     document.getElementById('meta-signature').innerText = result.signature_type || result.signature?.actual_type || 'Unknown';
 
     const matchSpan = document.getElementById('meta-sig-match');
@@ -375,19 +502,19 @@ function displayScanResult(result) {
     document.getElementById('meta-modified-time').innerText = result.modified_time || result.metadata?.modified_time || '-';
     document.getElementById('meta-accessed-time').innerText = result.accessed_time || result.metadata?.accessed_time || '-';
 
+    const sha256Val = result.sha256_hash || result.metadata?.sha256_hash || result.summary?.sha256 || result.summary?.sha256_hash || 'N/A';
+    document.getElementById('meta-sha256-hash').innerText = sha256Val;
+
     // 3. ML Prediction Card
     document.getElementById('ml-prediction-card').style.display = 'block';
     const predLabel = result.ml_prediction || 'Normal';
     const predColor = predLabel === 'Suspicious' ? 'var(--accent-red)' : 'var(--accent-green)';
     document.getElementById('ml-pred-label').innerHTML = `<span style="color: ${predColor}; font-weight: 700;">${predLabel}</span>`;
     document.getElementById('ml-prob-val').innerText = `${((result.ml_probability || 0) * 100).toFixed(1)}%`;
-    document.getElementById('ml-conf-val').innerText = `${result.ml_confidence_percent || 96.7}%`;
+    document.getElementById('ml-conf-val').innerText = `${result.ml_confidence_percent || result.ml_confidence || 96.7}%`;
 
-    // 4. Findings Table
+    // 4. Findings Table (Forensic Scanner view)
     renderFindingsTable(result.findings || []);
-
-    // 5. Features Matrix Table
-    renderFeaturesTable(result.features || {});
 }
 
 function renderFindingsTable(findings) {
@@ -396,7 +523,7 @@ function renderFindingsTable(findings) {
     if (!findings || findings.length === 0) {
         wrap.innerHTML = `
             <div class="empty-state">
-                <div class="empty-icon">✓</div>
+                <div class="empty-icon">🛡️</div>
                 <h4>Clean Forensic Baseline</h4>
                 <p>No anti-forensic evasion techniques or timestamp anomalies detected for this evidence file.</p>
             </div>
@@ -408,9 +535,9 @@ function renderFindingsTable(findings) {
         <table class="data-table">
             <thead>
                 <tr>
-                    <th style="width: 100px;">Severity</th>
-                    <th style="width: 130px;">Category</th>
-                    <th>Anomaly Title & Description</th>
+                    <th style="width: 110px;">Severity</th>
+                    <th style="width: 140px;">Category</th>
+                    <th>Anomaly Title & Forensic Description</th>
                     <th>Artifact Target</th>
                 </tr>
             </thead>
@@ -425,7 +552,7 @@ function renderFindingsTable(findings) {
                 <td><span class="mono">${f.category}</span></td>
                 <td>
                     <strong>${f.title}</strong>
-                    <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">${f.description || ''}</div>
+                    <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px; line-height: 1.4;">${f.description || ''}</div>
                 </td>
                 <td><span class="mono" style="font-size: 11px; word-break: break-all;">${f.artifact_path || '-'}</span></td>
             </tr>
@@ -436,68 +563,331 @@ function renderFindingsTable(findings) {
     wrap.innerHTML = html;
 }
 
-function renderFeaturesTable(features) {
-    const tbody = document.getElementById('features-tbody');
-    tbody.innerHTML = '';
+// ============================================================================
+// Dedicated Standalone ML Feature Matrix View (View 3)
+// ============================================================================
 
-    if (!features || Object.keys(features).length === 0) {
-        tbody.innerHTML = '<tr><td colspan="3" class="empty-state">No features extracted for this scan.</td></tr>';
-        return;
+async function renderMLFeatureMatrixView(result, modelMeta) {
+    if (!result) return;
+
+    if (!modelMeta) {
+        try {
+            const res = await fetch('/api/ml/model', { cache: 'no-store' });
+            const data = await res.json();
+            if (data.status === 'success') {
+                cachedModelMetadata = data.model;
+                modelMeta = data.model;
+            }
+        } catch (e) {
+            console.warn("Could not fetch ML model metadata:", e);
+        }
     }
 
-    Object.keys(features).sort().forEach(name => {
-        const val = features[name];
-        const valStr = typeof val === 'number' && !Number.isInteger(val) ? val.toFixed(4) : val;
-        const typeStr = name.includes('flag') || name.startsWith('has_') || name.startsWith('is_') || name.includes('anomaly') || name.includes('zeroed') || name.includes('m_lt_c') ? 'Boolean' : 'Numeric';
+    const noScanState = document.getElementById('ml-no-scan-state');
+    const container = document.getElementById('ml-selected-scan-container');
+    const actions = document.getElementById('ml-view-actions');
+    if (noScanState) noScanState.style.display = 'none';
+    if (container) container.style.display = 'block';
+    if (actions) actions.style.display = 'flex';
 
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-            <td><span class="mono">${name}</span></td>
-            <td><span class="badge badge-low">${typeStr}</span></td>
-            <td><strong>${valStr}</strong></td>
-        `;
-        tbody.appendChild(tr);
-    });
+    // 1. Evidence Overview Card
+    const fileNameEl = document.getElementById('ml-card-file-name');
+    if (fileNameEl) fileNameEl.innerText = result.file_name || '-';
+    const scanIdEl = document.getElementById('ml-card-scan-id');
+    if (scanIdEl) scanIdEl.innerText = result.scan_id || '-';
+    const scanDateEl = document.getElementById('ml-card-scan-date');
+    if (scanDateEl) scanDateEl.innerText = result.scan_date || result.created_time || '-';
+    const sha256El = document.getElementById('ml-card-sha256');
+    if (sha256El) sha256El.innerText = result.sha256_hash || result.metadata?.sha256_hash || '-';
+
+    // 2. Classifier Architecture Card
+    if (modelMeta) {
+        const typeEl = document.getElementById('ml-card-model-type');
+        if (typeEl) typeEl.innerText = modelMeta.model_type || 'Random Forest Classifier';
+        const treesEl = document.getElementById('ml-card-estimators');
+        if (treesEl) treesEl.innerText = `${modelMeta.n_estimators || 100} Decision Trees`;
+        const featsEl = document.getElementById('ml-card-feature-count');
+        if (featsEl) featsEl.innerText = `${modelMeta.feature_count || 16} Dimensions`;
+        const critEl = document.getElementById('ml-card-criterion');
+        if (critEl) critEl.innerText = `${modelMeta.criterion || 'gini'} (Gini Impurity)`;
+    }
+
+    // 3. Inference & Probabilities Card
+    const predLabel = result.ml_prediction || 'Normal';
+    const predColor = predLabel === 'Suspicious' ? 'var(--accent-red)' : 'var(--accent-green)';
+    const predEl = document.getElementById('ml-card-prediction');
+    if (predEl) predEl.innerHTML = `<span style="color: ${predColor}; font-weight: 700;">${predLabel}</span>`;
+    const probEl = document.getElementById('ml-card-probability');
+    if (probEl) probEl.innerText = `${((result.ml_probability || 0) * 100).toFixed(1)}%`;
+    const confEl = document.getElementById('ml-card-confidence');
+    if (confEl) confEl.innerText = `${result.ml_confidence_percent || result.ml_confidence || 96.7}%`;
+
+    // 4. Feature Importance Horizontal Bars (Exact trained weights)
+    const barsContainer = document.getElementById('ml-importance-bars');
+    if (barsContainer && modelMeta && modelMeta.feature_importances) {
+        barsContainer.innerHTML = '';
+        const importances = modelMeta.feature_importances;
+        const sortedEntries = Object.entries(importances).sort((a, b) => b[1] - a[1]);
+        const maxImp = sortedEntries.length > 0 && sortedEntries[0][1] > 0 ? sortedEntries[0][1] : 1.0;
+
+        sortedEntries.forEach(([featName, weight]) => {
+            const pct = (weight * 100).toFixed(2);
+            const barWidth = Math.min(100, Math.max(3, (weight / maxImp) * 100)).toFixed(1);
+
+            const item = document.createElement('div');
+            item.className = 'importance-item';
+            item.innerHTML = `
+                <div class="importance-header">
+                    <span class="importance-name">${featName}</span>
+                    <span class="importance-pct">${pct}% (weight: ${weight})</span>
+                </div>
+                <div class="importance-bar-track">
+                    <div class="importance-bar-fill" style="width: ${barWidth}%;"></div>
+                </div>
+            `;
+            barsContainer.appendChild(item);
+        });
+    }
+
+    // 5. Full 16-Feature Vector Table
+    const tbody = document.getElementById('ml-full-matrix-tbody');
+    if (tbody) {
+        tbody.innerHTML = '';
+        const features = result.features || {};
+        const importances = (modelMeta && modelMeta.feature_importances) ? modelMeta.feature_importances : {};
+
+        const allFeatureNames = modelMeta?.feature_names || [
+            "file_size", "is_hidden", "is_in_hidden_folder", "extension_match",
+            "has_double_extension", "has_suspicious_extension", "signature_type",
+            "metadata_anomaly", "filename_anomaly", "access_time_anomaly",
+            "modification_time_anomaly", "creation_time_anomaly", "has_ads_streams",
+            "subsecond_zeroed", "causal_m_lt_c", "future_timestamp"
+        ];
+
+        allFeatureNames.forEach(feat => {
+            const rawVal = features[feat] !== undefined ? features[feat] : '-';
+            let valStr = rawVal;
+            if (typeof rawVal === 'number' && !Number.isInteger(rawVal)) {
+                valStr = rawVal.toFixed(4);
+            } else if (typeof rawVal === 'boolean') {
+                valStr = rawVal ? 'true (1)' : 'false (0)';
+            }
+
+            const typeStr = (feat.startsWith('has_') || feat.startsWith('is_') || feat.includes('anomaly') || feat.includes('zeroed') || feat.includes('m_lt_c') || feat.includes('match')) 
+                ? 'Boolean (0/1)' 
+                : (feat === 'signature_type' ? 'Categorical (Encoded)' : 'Numerical');
+
+            const weightVal = importances[feat] !== undefined ? `${(importances[feat] * 100).toFixed(2)}%` : '-';
+
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><strong class="mono" style="color: var(--accent-blue);">${feat}</strong></td>
+                <td><span class="badge badge-low">${typeStr}</span></td>
+                <td><strong class="mono">${valStr}</strong></td>
+                <td><span class="mono" style="color: var(--accent-green); font-weight: 600;">${weightVal}</span></td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
 }
 
-function renderHistoryTable(scans) {
+// ============================================================================
+// Complete Persistent Scan History Page (Search, Filter, Sort, Pagination)
+// ============================================================================
+
+function handleHistorySearchInput() {
+    clearTimeout(historySearchDebounceTimer);
+    historySearchDebounceTimer = setTimeout(() => {
+        loadHistoryPage(1);
+    }, 300);
+}
+
+async function loadHistoryPage(page = 1) {
+    currentHistoryPage = page;
+    const tbody = document.getElementById('history-tbody');
+    if (!tbody) return;
+
+    tbody.innerHTML = '<tr><td colspan="9" class="loading-state">Querying persistent database records...</td></tr>';
+
+    const search = document.getElementById('history-search-input')?.value || '';
+    const riskLevel = document.getElementById('history-filter-risk')?.value || 'ALL';
+    const status = document.getElementById('history-filter-status')?.value || 'ALL';
+    const sort = document.getElementById('history-sort')?.value || 'newest';
+    const limit = parseInt(document.getElementById('history-limit')?.value || '25', 10);
+
+    const params = new URLSearchParams({
+        page: currentHistoryPage,
+        limit: limit,
+        search: search,
+        risk_level: riskLevel,
+        status: status,
+        sort: sort
+    });
+
+    try {
+        const res = await fetch(`/api/history?${params.toString()}`);
+        const data = await res.json();
+
+        if (data.status === 'success') {
+            renderFullHistoryTable(data.scans || []);
+            updateHistoryPagination(data.total || 0, data.page, data.limit, data.total_pages);
+        } else {
+            tbody.innerHTML = `<tr><td colspan="9" class="empty-state">${data.message || 'Error loading scan history.'}</td></tr>`;
+        }
+    } catch (err) {
+        console.error("Error fetching history page:", err);
+        tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Failed to retrieve historical scans from server.</td></tr>';
+    }
+}
+
+function renderFullHistoryTable(scans) {
     const tbody = document.getElementById('history-tbody');
     if (!tbody) return;
 
     if (!scans || scans.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No scan history recorded in SQLite yet.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="empty-state"><div class="empty-icon">📁</div><h4>No Scan Records Found</h4><p>No historical scans match your current filter criteria.</p></td></tr>';
         return;
     }
 
     tbody.innerHTML = '';
     scans.forEach(s => {
         const risk = s.risk_score || 0.0;
-        const riskLevel = s.summary?.risk_level || (risk >= 61 ? 'HIGH' : (risk >= 31 ? 'MEDIUM' : 'LOW'));
+        const riskLevel = (s.risk_level || s.summary?.risk_level || (risk >= 80 ? 'CRITICAL' : (risk >= 61 ? 'HIGH' : (risk >= 31 ? 'MEDIUM' : (risk > 0 ? 'LOW' : 'CLEAN'))))).toUpperCase();
         const riskBadgeClass = `badge-${riskLevel.toLowerCase()}`;
-        const targetName = s.summary?.file_name || (s.target_path ? s.target_path.split(/[\\/]/).pop() : formatScanType(s.target_type));
-        const mlPred = s.summary?.ml_prediction || (risk >= 50 ? 'Suspicious' : 'Normal');
+        const targetName = s.filename || s.summary?.file_name || (s.target_path ? s.target_path.split(/[\\/]/).pop() : formatScanType(s.target_type));
+        const mlPred = s.ml_prediction || s.summary?.ml_prediction || (risk >= 50 ? 'Suspicious' : 'Normal');
+        const statusStr = s.status || 'COMPLETED';
+        const statusBadgeClass = `badge-${statusStr.toLowerCase()}`;
+
+        const sha256Val = s.sha256_hash || s.summary?.sha256 || s.summary?.sha256_hash || 'N/A';
+        const sha256Short = sha256Val.length > 16 ? `${sha256Val.substring(0, 10)}...${sha256Val.substring(sha256Val.length - 6)}` : sha256Val;
+
+        const dateStr = s.start_time ? new Date(s.start_time).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : '-';
+
+        const critCount = s.critical_count || (s.summary?.critical_count || 0);
+        const highCount = s.high_count || (s.summary?.high_count || 0);
+        let findingsTag = `${s.total_findings || 0}`;
+        if (critCount > 0 || highCount > 0) {
+            findingsTag += ` <span style="font-size: 11px; color: var(--accent-red);">(${critCount + highCount} high)</span>`;
+        }
 
         const tr = document.createElement('tr');
         tr.innerHTML = `
-            <td><span class="mono">${s.scan_id.substring(0, 8)}...</span></td>
-            <td>${s.start_time || '-'}</td>
-            <td><strong>${targetName}</strong></td>
+            <td>
+                <strong>${targetName}</strong>
+                <div style="font-size: 11px; font-family: var(--font-mono); color: var(--text-muted);">${s.scan_id.substring(0, 8)}...</div>
+            </td>
+            <td>${dateStr}</td>
+            <td><span class="badge ${statusBadgeClass}">${statusStr}</span></td>
             <td><strong>${risk.toFixed(1)}/100</strong></td>
             <td><span class="badge ${riskBadgeClass}">${riskLevel}</span></td>
-            <td>${mlPred}</td>
-            <td>${s.total_findings || 0}</td>
+            <td>${findingsTag}</td>
             <td>
-                <button class="btn-sm btn-outline" onclick="selectScanAndSwitch('${s.scan_id}')">View</button>
-                <button class="btn-sm btn-primary" onclick="downloadPDFById('${s.scan_id}')">PDF</button>
+                <span class="sha256-chip" title="Click to copy SHA-256: ${sha256Val}" onclick="copyToClipboard('${sha256Val}', this)">
+                    📋 ${sha256Short}
+                </span>
+            </td>
+            <td>${mlPred}</td>
+            <td>
+                <div class="action-btn-group">
+                    <button class="btn-sm btn-outline" title="Open in Forensic Scanner" onclick="selectScanAndSwitch('${s.scan_id}')">🔍 View Scan</button>
+                    <button class="btn-sm btn-outline" title="Open in ML Feature Matrix" onclick="selectScanAndShowML('${s.scan_id}')">🧠 View ML Features</button>
+                    <button class="btn-sm btn-primary" title="Download Forensic Report PDF" onclick="downloadPDFById('${s.scan_id}')">📄 PDF</button>
+                    <button class="btn-danger-outline" title="Delete scan from history" onclick="openDeleteModal('${s.scan_id}', '${targetName.replace(/'/g, "\\'")}')">🗑️</button>
+                </div>
             </td>
         `;
         tbody.appendChild(tr);
     });
 }
 
+function updateHistoryPagination(totalCount, currentPage, limit, totalPages) {
+    totalHistoryPages = totalPages || 1;
+    currentHistoryPage = currentPage || 1;
+
+    const showingInfo = document.getElementById('history-showing-info');
+    const pageIndicator = document.getElementById('history-page-indicator');
+    const prevBtn = document.getElementById('btn-page-prev');
+    const nextBtn = document.getElementById('btn-page-next');
+
+    const start = totalCount === 0 ? 0 : (currentPage - 1) * limit + 1;
+    const end = Math.min(totalCount, currentPage * limit);
+
+    if (showingInfo) showingInfo.innerText = `Showing ${start}-${end} of ${totalCount} scans`;
+    if (pageIndicator) pageIndicator.innerText = `Page ${currentPage} of ${totalHistoryPages}`;
+
+    if (prevBtn) prevBtn.disabled = currentPage <= 1;
+    if (nextBtn) nextBtn.disabled = currentPage >= totalHistoryPages;
+}
+
+function changeHistoryPage(delta) {
+    const targetPage = currentHistoryPage + delta;
+    if (targetPage >= 1 && targetPage <= totalHistoryPages) {
+        loadHistoryPage(targetPage);
+    }
+}
+
 // ============================================================================
-// Actions & PDF Downloads
+// Deletion Workflow & Confirmation Modal
 // ============================================================================
+
+function openDeleteModal(scanId, filename) {
+    pendingDeleteScanId = scanId;
+    document.getElementById('delete-scan-filename').innerText = filename || 'Evidence Scan';
+    document.getElementById('delete-scan-id').innerText = `Scan ID: ${scanId}`;
+    document.getElementById('delete-modal').classList.add('active');
+}
+
+function closeDeleteModal() {
+    pendingDeleteScanId = null;
+    document.getElementById('delete-modal').classList.remove('active');
+}
+
+async function executeDeleteScan() {
+    if (!pendingDeleteScanId) return;
+
+    const deleteBtn = document.getElementById('btn-confirm-delete');
+    deleteBtn.disabled = true;
+    deleteBtn.innerText = 'Deleting...';
+
+    try {
+        const res = await fetch(`/api/scan/${pendingDeleteScanId}`, {
+            method: 'DELETE'
+        });
+        const data = await res.json();
+
+        if (data.status === 'success') {
+            closeDeleteModal();
+            // Refresh history table and recent scans list
+            await loadHistoryPage(currentHistoryPage);
+            await loadScans();
+        } else {
+            alert(`Failed to delete scan: ${data.message || 'Unknown error'}`);
+        }
+    } catch (err) {
+        alert('Network error deleting scan.');
+    } finally {
+        deleteBtn.disabled = false;
+        deleteBtn.innerText = 'Delete Scan';
+    }
+}
+
+// ============================================================================
+// Utility & Navigation Actions
+// ============================================================================
+
+function copyToClipboard(text, element) {
+    if (!text || text === 'N/A') return;
+    navigator.clipboard.writeText(text).then(() => {
+        const origText = element.innerText;
+        element.innerText = '✓ Copied!';
+        setTimeout(() => {
+            element.innerText = origText;
+        }, 1500);
+    }).catch(err => {
+        console.error("Copy failed:", err);
+    });
+}
 
 function downloadCurrentPDFReport() {
     if (!selectedScanId) return;
@@ -527,6 +917,8 @@ async function triggerBatchScan(type) {
             if (data.scan_id) {
                 selectScan(data.scan_id);
             }
+        } else {
+            alert(`Scan error: ${data.message || 'Failed'}`);
         }
     } catch (err) {
         alert('Error triggering scan.');
@@ -538,6 +930,14 @@ function selectScanAndSwitch(scanId) {
     selectScan(scanId);
 }
 
+async function selectScanAndShowML(scanId) {
+    switchView('features');
+    await selectScan(scanId);
+    if (currentScanResult) {
+        renderMLFeatureMatrixView(currentScanResult, cachedModelMetadata);
+    }
+}
+
 function switchView(view) {
     currentView = view;
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
@@ -546,26 +946,36 @@ function switchView(view) {
 
     const scannerBody = document.getElementById('view-scanner-body');
     const historyBody = document.getElementById('view-history-body');
-    const findingsWrap = document.getElementById('findings-table-wrap');
-    const featuresWrap = document.getElementById('features-table-wrap');
+    const featuresBody = document.getElementById('view-features-body');
 
     if (view === 'history') {
-        scannerBody.style.display = 'none';
-        historyBody.style.display = 'grid';
+        if (scannerBody) scannerBody.style.display = 'none';
+        if (historyBody) historyBody.style.display = 'grid';
+        if (featuresBody) featuresBody.style.display = 'none';
         document.getElementById('view-title').innerText = 'Historical Evidence Scans';
-        document.getElementById('view-subtitle').innerText = 'Persistent DFIR investigation records saved in SQLite database';
+        document.getElementById('view-subtitle').innerText = 'Persistent DFIR investigation records saved in database with user isolation';
+        loadHistoryPage(1);
     } else if (view === 'features') {
-        scannerBody.style.display = 'grid';
-        historyBody.style.display = 'none';
-        findingsWrap.style.display = 'none';
-        featuresWrap.style.display = 'block';
-        document.getElementById('view-title').innerText = 'ML Feature Vector Matrix';
-        document.getElementById('view-subtitle').innerText = '16 standard numerical & categorical forensic features feed into Random Forest model';
+        if (scannerBody) scannerBody.style.display = 'none';
+        if (historyBody) historyBody.style.display = 'none';
+        if (featuresBody) featuresBody.style.display = 'grid';
+        document.getElementById('view-title').innerText = 'Machine Learning Feature Matrix';
+        document.getElementById('view-subtitle').innerText = 'Explainable Random Forest classification across 16 engineered forensic dimensions';
+
+        if (selectedScanId && currentScanResult) {
+            renderMLFeatureMatrixView(currentScanResult, cachedModelMetadata);
+        } else {
+            const noScan = document.getElementById('ml-no-scan-state');
+            const container = document.getElementById('ml-selected-scan-container');
+            const actions = document.getElementById('ml-view-actions');
+            if (noScan) noScan.style.display = 'block';
+            if (container) container.style.display = 'none';
+            if (actions) actions.style.display = 'none';
+        }
     } else {
-        scannerBody.style.display = 'grid';
-        historyBody.style.display = 'none';
-        findingsWrap.style.display = 'block';
-        featuresWrap.style.display = 'none';
+        if (scannerBody) scannerBody.style.display = 'grid';
+        if (historyBody) historyBody.style.display = 'none';
+        if (featuresBody) featuresBody.style.display = 'none';
         document.getElementById('view-title').innerText = 'User-Driven Forensic Analysis';
         document.getElementById('view-subtitle').innerText = 'Select an evidence file from Windows File Explorer for strict read-only forensic inspection';
     }

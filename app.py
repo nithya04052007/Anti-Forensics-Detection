@@ -26,6 +26,16 @@ app.secret_key = os.environ.get("SECRET_KEY") or os.environ.get("FLASK_SECRET_KE
 db = DatabaseManager(db_path=DEFAULT_DB_PATH)
 
 
+@app.after_request
+def add_security_headers(response):
+    """Enforce strict no-cache headers for authenticated API endpoints to prevent local data leakage."""
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 def login_required(f):
     """
     Decorator to protect routes from unauthenticated access.
@@ -178,8 +188,16 @@ def logout():
     """Log out current user and clear session."""
     session.clear()
     if request.is_json:
-        return jsonify({"status": "success", "message": "Successfully logged out."})
-    return redirect(url_for("login"))
+        resp = jsonify({"status": "success", "message": "Successfully logged out."})
+    else:
+        resp = redirect(url_for("login"))
+    
+    # Explicitly invalidate session cookie and purge cache
+    resp.delete_cookie(app.config.get("SESSION_COOKIE_NAME", "session"))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0, private"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.route("/")
@@ -202,7 +220,7 @@ def index():
 # Phase 2 — Secure Evidence Upload & File/Folder Scanning
 # ============================================================================
 
-EVIDENCE_VAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evidence_vault")
+EVIDENCE_VAULT = os.environ.get("EVIDENCE_VAULT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "evidence_vault"))
 os.makedirs(EVIDENCE_VAULT, exist_ok=True)
 
 
@@ -213,7 +231,7 @@ def upload_and_scan_evidence():
     Handle secure file upload from the browser's native Windows File Explorer picker.
     Stores the evidence in an isolated, read-only evidence vault and executes
     the full TeamMember1 read-only forensic inspection, ML prediction, SQLite storage,
-    and PDF report generation.
+    and PDF report generation linked to the authenticated user.
     """
     if "file" not in request.files:
         return jsonify({"status": "error", "message": "No file uploaded in request."}), 400
@@ -246,12 +264,25 @@ def upload_and_scan_evidence():
         except Exception:
             pass
 
-        # Execute single file forensic scan
-        result = run_single_file_scan(staged_path, db_path=DEFAULT_DB_PATH, generate_pdf=True)
-        return jsonify({"status": "success", "result": result})
+        user_id = session.get("user_id")
+
+        # Execute single file forensic scan linked to authenticated user
+        result = run_single_file_scan(staged_path, db_path=db.db_path, generate_pdf=True, user_id=user_id)
+        meta = dict(result.get("metadata") or result.get("file_info") or {})
+        if "sha256_hash" in meta and "sha256" not in meta:
+            meta["sha256"] = meta["sha256_hash"]
+
+        return jsonify({
+            "status": "success",
+            "success": True,
+            "result": result,
+            "scan_id": result.get("scan_id"),
+            "risk_level": result.get("risk_level"),
+            "file_info": meta
+        })
 
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Scan failed: {str(e)}"}), 500
+        return jsonify({"status": "error", "success": False, "message": f"Scan failed: {str(e)}"}), 500
 
 
 @app.route("/api/scan/upload-folder", methods=["POST"])
@@ -285,6 +316,8 @@ def upload_and_scan_folder():
         if not staged_files:
             return jsonify({"status": "error", "message": "No valid files could be extracted from folder."}), 400
 
+        user_id = session.get("user_id")
+
         # Scan the folder using directory collector and pipeline
         file_collector = FileCollector()
         scanned_files = file_collector.scan_directory(folder_vault_dir)
@@ -296,7 +329,8 @@ def upload_and_scan_folder():
             event_logs=[],
             registry_keys=[],
             memory_artifacts=[],
-            db_path=DEFAULT_DB_PATH
+            db_path=DEFAULT_DB_PATH,
+            user_id=user_id
         )
 
         return jsonify({
@@ -324,60 +358,79 @@ def scan_selected_file():
         return jsonify({"status": "error", "message": f"Evidence file not found: {file_path}"}), 400
 
     try:
-        result = run_single_file_scan(file_path, db_path=DEFAULT_DB_PATH, generate_pdf=True)
+        user_id = session.get("user_id")
+        result = run_single_file_scan(file_path, db_path=DEFAULT_DB_PATH, generate_pdf=True, user_id=user_id)
         return jsonify({"status": "success", "result": result})
     except Exception as e:
         return jsonify({"status": "error", "message": f"Scan failed: {str(e)}"}), 500
 
 
 # ============================================================================
-# Phase 2 — PDF Report Download & Generation
+# Phase 2 — PDF Report Download & Generation (Persistent)
 # ============================================================================
 
 @app.route("/api/report/<scan_id>", methods=["GET"])
 @login_required
 def download_pdf_report(scan_id):
-    """Generate or retrieve and download the forensic PDF report for a scan session."""
+    """
+    Generate or retrieve and download the forensic PDF report for a scan session.
+    Strictly enforces authenticated user data isolation.
+    If the report file is missing on the filesystem (e.g., after Render container restart),
+    dynamically regenerates the PDF with 100% fidelity from the immutable database record.
+    """
+    user_id = session.get("user_id")
+    user_role = session.get("role", "analyst")
+    effective_user_id = None if user_role == "admin" else user_id
+
+    # Authorize scan access (returns None if scan does not exist or belongs to another user)
+    scan = db.get_scan(scan_id, user_id=effective_user_id)
+    if not scan:
+        app.logger.warning(f"[SECURITY EVENT] Unauthorized report access attempt: user_id={user_id}, scan_id='{scan_id}', endpoint='{request.path}'")
+        return jsonify({"status": "error", "message": "Scan report not found or access denied."}), 404
+
     pdf_filename = f"report_{scan_id}.pdf"
+    os.makedirs(REPORTS_DIR, exist_ok=True)
     pdf_path = os.path.join(REPORTS_DIR, pdf_filename)
 
-    if os.path.exists(pdf_path):
+    # If PDF already cached on disk, send it directly
+    if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
         return send_file(pdf_path, as_attachment=True, download_name=pdf_filename, mimetype="application/pdf")
 
-    # If PDF not on disk, regenerate dynamically from SQLite record
-    scan = db.get_scan(scan_id)
-    if not scan:
-        return jsonify({"status": "error", "message": "Scan not found"}), 404
+    # If PDF not on disk (e.g. freshly restarted server/Render deploy), regenerate dynamically from DB snapshot
+    summary = scan.get("summary") or {}
+    findings = db.get_findings(scan_id, user_id=effective_user_id)
+    features = db.get_features(scan_id, user_id=effective_user_id)
 
-    findings = db.get_findings(scan_id)
-    features = db.get_features(scan_id)
-
-    summary = scan.get("summary", {})
-    scan_data = {
-        "scan_id": scan_id,
-        "scan_date": scan.get("start_time", ""),
-        "file_name": summary.get("file_name", os.path.basename(scan.get("target_path", "Evidence"))),
-        "file_path": scan.get("target_path", "N/A"),
-        "file_size": summary.get("file_size", 0),
-        "risk_score": scan.get("risk_score", 0.0),
-        "risk_level": summary.get("risk_level", "LOW"),
-        "ml_prediction": summary.get("ml_prediction", "Normal"),
-        "metadata": {
-            "created_time": summary.get("created_time", "-"),
-            "modified_time": summary.get("modified_time", "-"),
-            "accessed_time": summary.get("accessed_time", "-"),
-            "file_attributes": [],
-            "md5_hash": "N/A",
-            "sha256_hash": "N/A"
-        },
-        "signature": {
-            "actual_type": summary.get("signature_type", "Unknown"),
-            "claimed_extension": summary.get("extension", ""),
-            "extension_match": summary.get("extension_match", True)
-        },
-        "findings": findings,
-        "features": features
-    }
+    # Use complete result JSON if stored, otherwise construct from fields
+    if scan.get("result"):
+        scan_data = scan["result"]
+    else:
+        file_display = scan.get("filename") or summary.get("file_name") or os.path.basename(scan.get("target_path", "Evidence"))
+        scan_data = {
+            "scan_id": scan_id,
+            "scan_date": scan.get("start_time", ""),
+            "file_name": file_display,
+            "file_path": scan.get("target_path", "N/A"),
+            "file_size": scan.get("file_size") or summary.get("file_size", 0),
+            "risk_score": scan.get("risk_score", 0.0),
+            "risk_level": scan.get("risk_level") or summary.get("risk_level", "LOW"),
+            "ml_prediction": scan.get("ml_prediction") or summary.get("ml_prediction", "Normal"),
+            "metadata": {
+                "created_time": summary.get("created_time", "-"),
+                "modified_time": summary.get("modified_time", "-"),
+                "accessed_time": summary.get("accessed_time", "-"),
+                "file_attributes": summary.get("file_attributes", []),
+                "md5_hash": summary.get("md5") or summary.get("md5_hash") or "N/A",
+                "sha256_hash": scan.get("sha256_hash") or summary.get("sha256") or summary.get("sha256_hash") or "N/A"
+            },
+            "signature": {
+                "actual_type": summary.get("signature_type", "Unknown"),
+                "claimed_extension": scan.get("file_type") or summary.get("extension", ""),
+                "extension_match": summary.get("extension_match", True)
+            },
+            "findings": findings,
+            "features": features
+        }
 
     try:
         generate_forensic_pdf_report(scan_data, pdf_path)
@@ -387,35 +440,174 @@ def download_pdf_report(scan_id):
 
 
 # ============================================================================
-# Scan History & Existing Phase 1 Endpoints
+# Scan History & Management API (Persistent & User-Isolated)
 # ============================================================================
 
 @app.route("/api/scans", methods=["GET"])
 @app.route("/api/history", methods=["GET"])
 @login_required
 def get_scans():
-    """Retrieve list of historical scans from SQLite."""
-    scans = db.list_scans(limit=100)
-    return jsonify({"status": "success", "scans": scans})
+    """
+    Retrieve list of historical scans from persistent database.
+    Includes user data isolation, searching, filtering, sorting, and pagination.
+    """
+    user_id = session.get("user_id")
+    user_role = session.get("role", "analyst")
+
+    # Admins can optionally see all scans if requested, otherwise isolated to authenticated user
+    effective_user_id = None if (user_role == "admin" and request.args.get("all_users") == "true") else user_id
+
+    search = request.args.get("search", "").strip()
+    risk_level = request.args.get("risk_level", "").strip()
+    status = request.args.get("status", "").strip()
+    sort_by = request.args.get("sort", "newest").strip()
+
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+        limit = min(100, max(1, int(request.args.get("limit", 50))))
+    except ValueError:
+        page = 1
+        limit = 50
+
+    offset = (page - 1) * limit
+
+    scans = db.list_scans(
+        user_id=effective_user_id,
+        limit=limit,
+        offset=offset,
+        search=search,
+        risk_level=risk_level,
+        status=status,
+        sort_by=sort_by
+    )
+
+    total_count = db.count_scans(
+        user_id=effective_user_id,
+        search=search,
+        risk_level=risk_level,
+        status=status
+    )
+
+    stats = db.get_user_scan_stats(user_id=effective_user_id)
+
+    return jsonify({
+        "status": "success",
+        "success": True,
+        "scans": scans,
+        "total": total_count,
+        "page": page,
+        "limit": limit,
+        "total_pages": max(1, (total_count + limit - 1) // limit),
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total_records": total_count,
+            "total_pages": max(1, (total_count + limit - 1) // limit)
+        },
+        "stats": stats
+    })
 
 
 @app.route("/api/scan/<scan_id>", methods=["GET"])
 @login_required
 def get_scan_details(scan_id):
-    """Retrieve full details, findings, and features for a specific scan."""
-    scan = db.get_scan(scan_id)
-    if not scan:
-        return jsonify({"status": "error", "message": "Scan not found"}), 404
+    """
+    Retrieve full details, findings, and features for a specific scan.
+    Enforces user data isolation.
+    """
+    user_id = session.get("user_id")
+    user_role = session.get("role", "analyst")
+    effective_user_id = None if user_role == "admin" else user_id
 
-    findings = db.get_findings(scan_id)
-    features = db.get_features(scan_id)
+    scan = db.get_scan(scan_id, user_id=effective_user_id)
+    if not scan:
+        app.logger.warning(f"[SECURITY EVENT] Unauthorized scan details access attempt: user_id={user_id}, scan_id='{scan_id}', endpoint='{request.path}'")
+        return jsonify({"status": "error", "success": False, "message": "Scan record not found or access denied."}), 404
+
+    findings = db.get_findings(scan_id, user_id=effective_user_id)
+    features = db.get_features(scan_id, user_id=effective_user_id)
+
+    # Extract real trained model metadata & feature weights
+    try:
+        from ml.predict import get_model_metadata
+        model_metadata = get_model_metadata()
+    except Exception as e:
+        app.logger.warning(f"Error loading model metadata: {e}")
+        model_metadata = None
 
     return jsonify({
         "status": "success",
+        "success": True,
         "scan": scan,
         "findings": findings,
-        "features": features
+        "features": features,
+        "model_metadata": model_metadata,
+        "result": scan.get("result")
     })
+
+
+@app.route("/api/ml/model", methods=["GET"])
+@login_required
+def get_ml_model_info():
+    """
+    Retrieve real Random Forest model architecture metadata and exact feature importances.
+    Provides true model explainability weights directly from sklearn.
+    """
+    try:
+        from ml.predict import get_model_metadata
+        metadata = get_model_metadata()
+        return jsonify({
+            "status": "success",
+            "success": True,
+            "model": metadata
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/scan/<scan_id>", methods=["DELETE"])
+@login_required
+def delete_scan_record(scan_id):
+    """
+    Safely delete an individual scan history record and its cascaded findings/features.
+    Enforces strict user ownership verification.
+    """
+    user_id = session.get("user_id")
+    user_role = session.get("role", "analyst")
+    effective_user_id = None if user_role == "admin" else user_id
+
+    # Verify ownership before deletion
+    scan = db.get_scan(scan_id, user_id=effective_user_id)
+    if not scan:
+        app.logger.warning(f"[SECURITY EVENT] Unauthorized scan deletion attempt: user_id={user_id}, scan_id='{scan_id}', endpoint='{request.path}'")
+        return jsonify({"status": "error", "success": False, "message": "Scan record not found or access denied."}), 404
+
+    success = db.delete_scan(scan_id, user_id=effective_user_id)
+    if success:
+        # Optionally clean up cached PDF report
+        pdf_path = os.path.join(REPORTS_DIR, f"report_{scan_id}.pdf")
+        if os.path.exists(pdf_path):
+            try:
+                os.remove(pdf_path)
+            except Exception:
+                pass
+
+        return jsonify({
+            "status": "success",
+            "success": True,
+            "message": f"Scan '{scan.get('filename') or scan_id}' has been permanently removed from your history."
+        })
+    else:
+        return jsonify({"status": "error", "success": False, "message": "Failed to delete scan record."}), 500
+
+
+@app.route("/api/stats", methods=["GET"])
+@login_required
+def get_user_stats():
+    """Retrieve aggregated dashboard metrics for the authenticated user."""
+    user_id = session.get("user_id")
+    stats = db.get_user_scan_stats(user_id=user_id)
+    return jsonify({"status": "success", "stats": stats})
 
 
 @app.route("/api/scan/trigger", methods=["POST"])
@@ -425,6 +617,7 @@ def trigger_scan():
     data = request.get_json() or {}
     scan_type = data.get("type", "demo")
     target_path = data.get("target_path", "")
+    user_id = session.get("user_id")
 
     if scan_type == "demo":
         simulator = ForensicSandboxSimulator()
@@ -439,7 +632,8 @@ def trigger_scan():
             event_logs=event_logs,
             registry_keys=registry_artifacts,
             memory_artifacts=memory_artifacts,
-            db_path=DEFAULT_DB_PATH
+            db_path=DEFAULT_DB_PATH,
+            user_id=user_id
         )
         return jsonify({"status": "success", "scan_id": result.scan_id, "risk_score": result.risk_score})
 
@@ -456,7 +650,8 @@ def trigger_scan():
             event_logs=[],
             registry_keys=[],
             memory_artifacts=[],
-            db_path=DEFAULT_DB_PATH
+            db_path=DEFAULT_DB_PATH,
+            user_id=user_id
         )
         return jsonify({"status": "success", "scan_id": result.scan_id, "risk_score": result.risk_score})
 
@@ -475,7 +670,8 @@ def trigger_scan():
             event_logs=event_logs,
             registry_keys=registry_keys,
             memory_artifacts=[],
-            db_path=DEFAULT_DB_PATH
+            db_path=DEFAULT_DB_PATH,
+            user_id=user_id
         )
         return jsonify({"status": "success", "scan_id": result.scan_id, "risk_score": result.risk_score})
 
@@ -485,8 +681,17 @@ def trigger_scan():
 @app.route("/api/features/export/<scan_id>", methods=["GET"])
 @login_required
 def export_features_csv(scan_id):
-    """Export and download scan features as CSV."""
-    df = db.get_features_dataframe(scan_id=scan_id)
+    """Export and download scan features as CSV with user authorization check."""
+    user_id = session.get("user_id")
+    user_role = session.get("role", "analyst")
+    effective_user_id = None if user_role == "admin" else user_id
+
+    scan = db.get_scan(scan_id, user_id=effective_user_id)
+    if not scan:
+        app.logger.warning(f"[SECURITY EVENT] Unauthorized CSV export attempt: user_id={user_id}, scan_id='{scan_id}', endpoint='{request.path}'")
+        return jsonify({"status": "error", "message": "Scan record not found or access denied."}), 404
+
+    df = db.get_features_dataframe(scan_id=scan_id, user_id=effective_user_id)
     if df.empty:
         return jsonify({"status": "error", "message": "No features found"}), 404
 

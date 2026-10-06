@@ -22,7 +22,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/style.css?v=2.2">
+    <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
     <div class="app-container">
@@ -159,24 +159,24 @@
                     </div>
 
                     <div class="panel-content" id="details-content">
-                        <!-- Evidence File Selection Banner (Acts as Native Explorer Target & Drag-and-Drop Zone) -->
+                        <!-- Evidence File Selection Banner -->
                         <div class="file-selection-banner" id="file-selection-banner">
-                            <!-- Accessible File & Folder Inputs: Rendered with 1x1 geometry so Chromium PWA triggers system dialogs -->
-                            <input type="file" id="evidence-file-input" class="accessible-file-input" onchange="handleFileChosen(event)">
-                            <input type="file" id="evidence-folder-input" webkitdirectory directory multiple class="accessible-file-input" onchange="handleFolderChosen(event)">
+                            <!-- Hidden HTML File & Folder Inputs (Opens Windows File Explorer natively) -->
+                            <input type="file" id="evidence-file-input" style="display: none;" onchange="handleFileChosen(event)">
+                            <input type="file" id="evidence-folder-input" webkitdirectory directory multiple style="display: none;" onchange="handleFolderChosen(event)">
 
-                            <div class="banner-icon" id="banner-icon-display">📂</div>
-                            <div class="banner-info" id="banner-info-box">
+                            <div class="banner-icon">📂</div>
+                            <div class="banner-info">
                                 <h4>Evidence File Ready for Scan</h4>
-                                <p id="banner-path-text">No evidence file selected yet. Click below or drag and drop a file from Windows Explorer.</p>
+                                <p id="banner-path-text">No evidence file selected yet. Click below to browse Windows File Explorer.</p>
                             </div>
                             <div class="banner-buttons">
-                                <label for="evidence-file-input" class="btn btn-secondary" id="label-select-file" onclick="handleSelectFileClick(event)" style="cursor: pointer; display: inline-flex; align-items: center; gap: 8px;">
+                                <button class="btn btn-secondary" onclick="openFilePicker()">
                                     🔍 Select File
-                                </label>
-                                <label for="evidence-folder-input" class="btn btn-outline" id="label-select-folder" onclick="handleSelectFolderClick(event)" style="cursor: pointer; display: inline-flex; align-items: center; gap: 8px; font-size: 13px;">
+                                </button>
+                                <button class="btn btn-outline" onclick="openFolderPicker()" style="font-size: 13px;">
                                     📁 Select Folder
-                                </label>
+                                </button>
                                 <button class="btn btn-primary" id="btn-run-scan" onclick="executeSelectedFileScan()" style="display: none;">
                                     🚀 Scan Selected File
                                 </button>
@@ -482,20 +482,20 @@
                 <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 16px;">
                     Select the forensic investigation mode. The target evidence file will be analyzed in <b>strict read-only mode</b> without altering file content or metadata.
                 </p>
-                <label for="evidence-file-input" class="scan-option-card" onclick="handleModalFileSelect(event)" style="cursor: pointer;">
+                <div class="scan-option-card" onclick="openFilePickerFromModal()">
                     <div class="option-icon">📄</div>
                     <div class="option-text">
                         <h4>Select Evidence File (Windows Explorer)</h4>
                         <p>Opens Windows File Explorer to choose an individual file for signature, timestomp, and ML risk evaluation.</p>
                     </div>
-                </label>
-                <label for="evidence-folder-input" class="scan-option-card" onclick="handleModalFolderSelect(event)" style="cursor: pointer;">
+                </div>
+                <div class="scan-option-card" onclick="openFolderPickerFromModal()">
                     <div class="option-icon">📁</div>
                     <div class="option-text">
                         <h4>Select Evidence Folder / Directory</h4>
                         <p>Opens Windows Explorer to select an entire folder of evidence files for batch forensic scanning.</p>
                     </div>
-                </label>
+                </div>
                 <div class="scan-option-card" onclick="triggerBatchScan('demo')">
                     <div class="option-icon">⚡</div>
                     <div class="option-text">
@@ -536,7 +536,7 @@
         </div>
     </div>
 
-    <script src="/static/js/app.js?v=2.2"></script>
+    <script src="/static/js/app.js"></script>
 
     <!-- PWA Service Worker Registration -->
     <script>

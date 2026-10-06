@@ -24,41 +24,8 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
         sessionStorage.clear();
     } catch (e) {}
-    initDragAndDrop();
     loadScans();
 });
-
-function initDragAndDrop() {
-    const banner = document.getElementById('file-selection-banner');
-    if (!banner) return;
-
-    ['dragenter', 'dragover'].forEach(eventName => {
-        banner.addEventListener(eventName, (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            banner.classList.add('drag-over');
-        });
-    });
-
-    ['dragleave', 'drop'].forEach(eventName => {
-        banner.addEventListener(eventName, (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            banner.classList.remove('drag-over');
-        });
-    });
-
-    banner.addEventListener('drop', (e) => {
-        const dt = e.dataTransfer;
-        if (dt && dt.files && dt.files.length > 0) {
-            stageChosenFile(dt.files[0]);
-        }
-    });
-
-    // Prevent default window navigation on accidental drop outside banner
-    window.addEventListener('dragover', (e) => e.preventDefault());
-    window.addEventListener('drop', (e) => e.preventDefault());
-}
 
 function logoutUser(event) {
     if (event) event.preventDefault();
@@ -248,65 +215,6 @@ function openStartScanFlow() {
     openScanModal();
 }
 
-function stageChosenFile(file) {
-    if (!file) return;
-
-    stagedFile = file;
-    stagedFolderFiles = null;
-    selectedFilePath = file.name;
-
-    const bannerPath = document.getElementById('banner-path-text');
-    const scanBtn = document.getElementById('btn-run-scan');
-
-    const sizeKb = (file.size / 1024).toFixed(1);
-    const sizeFormatted = file.size > 1024 * 1024 
-        ? `${(file.size / (1024 * 1024)).toFixed(2)} MB` 
-        : `${sizeKb} KB`;
-
-    if (bannerPath) {
-        bannerPath.innerHTML = `<strong>Selected:</strong> <span style="color: var(--accent-blue); font-weight: 600;">${file.name}</span> (${sizeFormatted})<br/><span style="color: var(--text-muted); font-size: 11px;">Ready for strict read-only forensic analysis & ML evaluation</span>`;
-    }
-    
-    if (scanBtn) {
-        scanBtn.style.display = 'inline-flex';
-        scanBtn.innerText = '🚀 Scan Selected File';
-        scanBtn.onclick = executeSelectedFileScan;
-    }
-}
-
-async function handleSelectFileClick(event) {
-    // If showOpenFilePicker is available (Desktop Chrome / PWA), use it for direct native Explorer integration
-    if (typeof window.showOpenFilePicker === 'function') {
-        if (event) event.preventDefault();
-        await openFilePicker();
-    }
-    // Else allow default label action to trigger evidence-file-input natively
-}
-
-async function handleSelectFolderClick(event) {
-    if (typeof window.showDirectoryPicker === 'function') {
-        if (event) event.preventDefault();
-        await openFolderPicker();
-    }
-    // Else allow default label action to trigger evidence-folder-input natively
-}
-
-async function handleModalFileSelect(event) {
-    closeScanModal();
-    if (typeof window.showOpenFilePicker === 'function') {
-        if (event) event.preventDefault();
-        await openFilePicker();
-    }
-}
-
-async function handleModalFolderSelect(event) {
-    closeScanModal();
-    if (typeof window.showDirectoryPicker === 'function') {
-        if (event) event.preventDefault();
-        await openFolderPicker();
-    }
-}
-
 function openFilePickerFromModal() {
     closeScanModal();
     openFilePicker();
@@ -317,34 +225,7 @@ function openFolderPickerFromModal() {
     openFolderPicker();
 }
 
-async function openFilePicker() {
-    // 1. First attempt: Modern File System Access API (official native picker for desktop Chromium PWAs)
-    if (typeof window.showOpenFilePicker === 'function') {
-        try {
-            const handles = await window.showOpenFilePicker({
-                multiple: false,
-                types: [
-                    {
-                        description: 'Evidence Files',
-                        accept: {
-                            '*/*': []
-                        }
-                    }
-                ]
-            });
-            if (handles && handles.length > 0) {
-                const file = await handles[0].getFile();
-                stageChosenFile(file);
-                return;
-            }
-        } catch (err) {
-            // User cancelled file selection dialog
-            if (err.name === 'AbortError') return;
-            console.warn('[PWA] showOpenFilePicker fallback:', err);
-        }
-    }
-
-    // 2. Fallback: Accessible file input element
+function openFilePicker() {
     const input = document.getElementById('evidence-file-input');
     if (input) {
         input.value = ''; // Reset so same file can be re-selected
@@ -352,40 +233,7 @@ async function openFilePicker() {
     }
 }
 
-async function openFolderPicker() {
-    if (typeof window.showDirectoryPicker === 'function') {
-        try {
-            const dirHandle = await window.showDirectoryPicker();
-            if (dirHandle) {
-                const folderFiles = [];
-                for await (const entry of dirHandle.values()) {
-                    if (entry.kind === 'file') {
-                        const file = await entry.getFile();
-                        folderFiles.push(file);
-                    }
-                }
-                if (folderFiles.length > 0) {
-                    stagedFolderFiles = folderFiles;
-                    stagedFile = null;
-                    const bannerPath = document.getElementById('banner-path-text');
-                    const scanBtn = document.getElementById('btn-run-scan');
-                    if (bannerPath) {
-                        bannerPath.innerHTML = `<strong>Selected Folder:</strong> <span style="color: var(--accent-blue); font-weight: 600;">${dirHandle.name}</span> (${folderFiles.length} evidence files)<br/><span style="color: var(--text-muted); font-size: 11px;">Ready for batch recursive artifact inspection</span>`;
-                    }
-                    if (scanBtn) {
-                        scanBtn.style.display = 'inline-flex';
-                        scanBtn.innerText = `🚀 Scan Folder (${folderFiles.length} files)`;
-                        scanBtn.onclick = executeFolderScan;
-                    }
-                    return;
-                }
-            }
-        } catch (err) {
-            if (err.name === 'AbortError') return;
-            console.warn('[PWA] showDirectoryPicker fallback:', err);
-        }
-    }
-
+function openFolderPicker() {
     const input = document.getElementById('evidence-folder-input');
     if (input) {
         input.value = '';
@@ -395,10 +243,27 @@ async function openFolderPicker() {
 
 function handleFileChosen(event) {
     const files = event.target.files;
+    const bannerPath = document.getElementById('banner-path-text');
+    const scanBtn = document.getElementById('btn-run-scan');
+
     if (!files || files.length === 0) {
         return;
     }
-    stageChosenFile(files[0]);
+
+    stagedFile = files[0];
+    stagedFolderFiles = null;
+    selectedFilePath = stagedFile.name;
+
+    const sizeKb = (stagedFile.size / 1024).toFixed(1);
+    const sizeFormatted = stagedFile.size > 1024 * 1024 
+        ? `${(stagedFile.size / (1024 * 1024)).toFixed(2)} MB` 
+        : `${sizeKb} KB`;
+
+    bannerPath.innerHTML = `<strong>Selected:</strong> <span style="color: var(--accent-blue); font-weight: 600;">${stagedFile.name}</span> (${sizeFormatted})<br/><span style="color: var(--text-muted); font-size: 11px;">Ready for strict read-only forensic analysis & ML evaluation</span>`;
+    
+    scanBtn.style.display = 'inline-flex';
+    scanBtn.innerText = '🚀 Scan Selected File';
+    scanBtn.onclick = executeSelectedFileScan;
 }
 
 function handleFolderChosen(event) {

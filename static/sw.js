@@ -19,12 +19,13 @@
  * All authenticated API requests go NETWORK-ONLY (never cached, never stored).
  */
 
-const CACHE_NAME = 'afd-static-shell-v1';
+const CACHE_NAME = 'afd-static-shell-v2';
 
 // Static shell assets that are safe to cache (non-sensitive, non-user-specific)
 const STATIC_SHELL = [
   '/static/css/style.css',
   '/static/js/app.js',
+  '/manifest.json',
   '/static/manifest.json',
   '/static/icons/icon-192.png',
   '/static/icons/icon-512.png'
@@ -91,12 +92,13 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // RULE 5 — Static shell assets: cache-first, fall back to network.
+  // RULE 5 — Static shell assets: Network-first with cache fallback.
+  // Fetches fresh CSS/JS when online so standalone PWA updates immediately,
+  // falling back to cache if offline. Sensitive API/auth data is NEVER handled here.
   if (STATIC_SHELL.includes(url.pathname)) {
     event.respondWith(
-      caches.match(event.request).then((cached) => {
-        return cached || fetch(event.request).then((response) => {
-          // Only cache successful, same-origin responses
+      fetch(event.request)
+        .then((response) => {
           if (
             response &&
             response.status === 200 &&
@@ -106,8 +108,10 @@ self.addEventListener('fetch', (event) => {
             caches.open(CACHE_NAME).then((cache) => cache.put(event.request, toCache));
           }
           return response;
-        });
-      })
+        })
+        .catch(() => {
+          return caches.match(event.request);
+        })
     );
     return;
   }

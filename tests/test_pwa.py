@@ -1,8 +1,11 @@
 """
-PWA installability validation — updated for all 3 bug fixes:
+PWA installability and standalone interaction validation:
   1. Manifest served via /manifest.json with Content-Type: application/manifest+json
-  2. SW registration on login.html (critical — first page users see)
-  3. SW registration on register.html
+  2. SW registration on all entry points (index, login, register)
+  3. Service Worker versioning & network-first shell strategy (afd-static-shell-v2)
+  4. Accessible file inputs in DOM layout tree (no display:none)
+  5. Native label associations for Chromium standalone PWA system dialog triggers
+  6. Drag & drop support in app.js
 """
 import json
 import os
@@ -60,23 +63,25 @@ else:
         sw = f.read()
     for name, result in {
         "CACHE_NAME defined": "CACHE_NAME" in sw,
+        "CACHE_NAME bumped to v2": "afd-static-shell-v2" in sw,
         "install handler": "install" in sw,
         "activate handler": "activate" in sw,
         "fetch handler": "fetch" in sw,
         "API network-only rule": "/api/" in sw,
         "auth routes network-only": "/login" in sw,
+        "evidence vault network-only": "/evidence_vault" in sw,
         "network-only policy": "network-only" in sw,
         "skipWaiting": "skipWaiting" in sw,
         "clients.claim": "clients.claim" in sw,
     }.items():
         ok(name) if result else fail(name)
 
-# --- 4. Check HTML templates ---
-print("\n[4] Checking HTML templates...")
+# --- 4. Check HTML templates & PWA File Input Accessibility ---
+print("\n[4] Checking HTML templates & PWA File Input Accessibility...")
 templates = [
     ("templates/index.html", True),
-    ("templates/login.html", True),    # FIX: login MUST register SW
-    ("templates/register.html", True), # FIX: register MUST register SW
+    ("templates/login.html", True),
+    ("templates/register.html", True),
 ]
 for path, check_sw in templates:
     with open(path, encoding="utf-8") as f:
@@ -93,8 +98,41 @@ for path, check_sw in templates:
     }.items():
         ok("{}: {}".format(os.path.basename(path), name)) if result else fail("{}: {}".format(os.path.basename(path), name))
 
-# --- 5. Check Flask app.py ---
-print("\n[5] Checking app.py...")
+with open("templates/index.html", encoding="utf-8") as f:
+    idx_content = f.read()
+
+for name, result in {
+    "file input NOT display:none": 'id="evidence-file-input" style="display: none;"' not in idx_content,
+    "file input uses accessible class": 'class="accessible-file-input"' in idx_content,
+    "label for file input in banner": '<label for="evidence-file-input"' in idx_content,
+    "label for file input in modal": 'label for="evidence-file-input" class="scan-option-card"' in idx_content,
+    "label for folder input in modal": 'label for="evidence-folder-input" class="scan-option-card"' in idx_content,
+}.items():
+    ok("index.html: {}".format(name)) if result else fail("index.html: {}".format(name))
+
+# --- 5. Check CSS & JS for standalone PWA support ---
+print("\n[5] Checking CSS & JS for standalone PWA support...")
+with open("static/css/style.css", encoding="utf-8") as f:
+    css_content = f.read()
+for name, result in {
+    "accessible-file-input CSS exists": ".accessible-file-input" in css_content,
+    "drag-over banner styling": ".file-selection-banner.drag-over" in css_content,
+}.items():
+    ok("style.css: {}".format(name)) if result else fail("style.css: {}".format(name))
+
+with open("static/js/app.js", encoding="utf-8") as f:
+    js_content = f.read()
+for name, result in {
+    "stageChosenFile function": "function stageChosenFile" in js_content,
+    "initDragAndDrop function": "function initDragAndDrop" in js_content,
+    "showOpenFilePicker check": "showOpenFilePicker" in js_content,
+    "handleSelectFileClick handler": "handleSelectFileClick" in js_content,
+    "handleModalFileSelect handler": "handleModalFileSelect" in js_content,
+}.items():
+    ok("app.js: {}".format(name)) if result else fail("app.js: {}".format(name))
+
+# --- 6. Check Flask app.py ---
+print("\n[6] Checking app.py...")
 with open("app.py", encoding="utf-8") as f:
     app_src = f.read()
 for name, result in {
@@ -117,4 +155,4 @@ if errors:
         print("  - {}".format(e))
     sys.exit(1)
 else:
-    print("ALL PWA INSTALLABILITY CHECKS PASSED")
+    print("ALL PWA INSTALLABILITY & STANDALONE CHECKS PASSED")

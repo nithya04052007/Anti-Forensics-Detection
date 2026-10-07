@@ -28,9 +28,7 @@ db = DatabaseManager(db_path=DEFAULT_DB_PATH)
 
 @app.after_request
 def add_security_headers(response):
-    """Enforce strict no-cache headers for authenticated API endpoints to prevent local data leakage.
-    PWA assets (sw.js, manifest.json, icons) are excluded — they manage their own cache headers.
-    """
+    """Enforce strict no-cache headers for authenticated API endpoints to prevent local data leakage."""
     if request.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
@@ -200,35 +198,6 @@ def logout():
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
     return resp
-
-
-@app.route("/manifest.json")
-def pwa_manifest():
-    """
-    Serve the PWA Web App Manifest with the CORRECT MIME type.
-    Chrome's installability checker requires Content-Type: application/manifest+json.
-    Flask's default static file serving uses application/json which can cause Chrome
-    to reject the manifest for PWA installability purposes.
-    """
-    response = app.send_static_file("manifest.json")
-    response.headers["Content-Type"] = "application/manifest+json; charset=utf-8"
-    response.headers["Cache-Control"] = "no-cache"
-    return response
-
-
-@app.route("/sw.js")
-def service_worker():
-    """
-    Serve the PWA service worker from the root path.
-    The service worker MUST be served from / (not /static/) so its scope
-    covers the entire application, including authenticated routes.
-    """
-    response = app.send_static_file("sw.js")
-    response.headers["Content-Type"] = "application/javascript"
-    response.headers["Service-Worker-Allowed"] = "/"
-    # Service worker file itself should not be cached by the browser long-term
-    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    return response
 
 
 @app.route("/")

@@ -1,0 +1,9 @@
+{
+    "name": "Anti-Forensics Detection",
+    "short_name": "Anti-Forensics",
+    "description": "Anti-Forensics Detection and Analysis Platform",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#ffffff",
+    "theme_color": "#0f172a"
+}
